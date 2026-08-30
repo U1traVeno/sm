@@ -12,7 +12,13 @@
 
 ## 安装
 
-在项目 checkout 中执行：
+从 crates.io 安装：
+
+```console
+$ cargo install sm-skill-manager
+```
+
+crate 名称是 `sm-skill-manager`，安装后的可执行文件仍是 `sm`。若要从项目 checkout 安装：
 
 ```console
 $ cargo install --path .

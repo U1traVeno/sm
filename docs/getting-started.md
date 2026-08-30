@@ -12,7 +12,13 @@ Git is optional at runtime. Use ordinary Git commands when `~/.sm` is a Git chec
 
 ## Installation
 
-From the project checkout:
+Install from crates.io:
+
+```console
+$ cargo install sm-skill-manager
+```
+
+The crate is named `sm-skill-manager`; the installed executable is `sm`. To install from a project checkout instead:
 
 ```console
 $ cargo install --path .

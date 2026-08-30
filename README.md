@@ -8,7 +8,13 @@ A Git repository under `~/.sm` stores every available skill. `sm enable` and `sm
 
 ## Installation
 
-The current implementation supports macOS and Linux and requires Rust 1.88 or newer to build:
+The current implementation supports macOS and Linux and requires Rust 1.88 or newer:
+
+```console
+$ cargo install sm-skill-manager
+```
+
+The crate is named `sm-skill-manager`; the installed executable is `sm`. To install from a source checkout instead:
 
 ```console
 $ cargo install --path .

@@ -1,8 +1,19 @@
 [package]
-name = "sm"
-version = "0.2.0"
+name = "sm-skill-manager"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.88"
+description = "A Unix-style profile and visibility manager for agent skills"
+license = "MIT"
+repository = "https://github.com/U1traVeno/sm"
+readme = "README.md"
+keywords = ["agent-skills", "cli", "profiles", "symlink"]
+categories = ["command-line-utilities", "development-tools"]
+exclude = ["/.github", "/docs/.vitepress", "/package.json", "/package-lock.json"]
+
+[[bin]]
+name = "sm"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"
