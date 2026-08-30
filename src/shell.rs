@@ -41,8 +41,21 @@ pub fn run_shell(
 
     let shell = env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"));
     let original_path = env::var_os("PATH").unwrap_or_default();
-    let path = prepend_path(&generation.join("bin"), &original_path)?;
-    let child_result = Command::new(shell)
+    let wrapper_bin = generation.join("bin");
+    let path = prepend_path(&wrapper_bin, &original_path)?;
+    let mut child_command = Command::new(&shell);
+    if let Err(error) = configure_shell_startup(
+        &mut child_command,
+        Path::new(&shell),
+        &generation,
+        &wrapper_bin,
+        shell_args,
+    ) {
+        let _ = fs::remove_dir(&creation_lease);
+        cleanup_empty_lease_parent(&creation_lease);
+        return Err(error);
+    }
+    let child_result = child_command
         .args(shell_args)
         .env("PATH", path)
         .env("SM_SKILLS_DIR", generation.join("skills"))
@@ -72,6 +85,110 @@ pub fn run_shell(
     let _ = fs::remove_dir(&lease);
     cleanup_empty_lease_parent(&lease);
     Ok(status)
+}
+
+fn configure_shell_startup(
+    command: &mut Command,
+    shell: &Path,
+    generation: &Path,
+    wrapper_bin: &Path,
+    shell_args: &[OsString],
+) -> Result<()> {
+    match shell.file_name().and_then(OsStr::to_str) {
+        Some("zsh") => configure_zsh_startup(command, generation, wrapper_bin),
+        Some("bash") => configure_bash_startup(command, generation, wrapper_bin, shell_args),
+        Some("fish") => {
+            command
+                .arg("--init-command")
+                .arg("set -gx PATH \"$SM_WRAPPER_BIN\" $PATH")
+                .env("SM_WRAPPER_BIN", wrapper_bin);
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn configure_zsh_startup(
+    command: &mut Command,
+    generation: &Path,
+    wrapper_bin: &Path,
+) -> Result<()> {
+    let managed_zdotdir = env::var_os("SM_ZSH_USER_DOTDIR");
+    let original_zdotdir = env::var_os("ZDOTDIR");
+    let zdotdir_was_unset = env::var_os("SM_ZSH_USER_ZDOTDIR_UNSET").is_some()
+        || (managed_zdotdir.is_none() && original_zdotdir.is_none());
+    let user_zdotdir = managed_zdotdir
+        .or(original_zdotdir)
+        .or_else(|| env::var_os("HOME"))
+        .context("HOME is not set and zsh has no ZDOTDIR")?;
+    command
+        .env("ZDOTDIR", generation.join("shell/zsh"))
+        .env("SM_ZSH_USER_DOTDIR", user_zdotdir)
+        .env("SM_WRAPPER_BIN", wrapper_bin);
+    if zdotdir_was_unset {
+        command.env("SM_ZSH_USER_ZDOTDIR_UNSET", "1");
+    } else {
+        command.env_remove("SM_ZSH_USER_ZDOTDIR_UNSET");
+    }
+    Ok(())
+}
+
+fn configure_bash_startup(
+    command: &mut Command,
+    generation: &Path,
+    wrapper_bin: &Path,
+    shell_args: &[OsString],
+) -> Result<()> {
+    if bash_login_requested(shell_args) {
+        bail!(
+            "bash login shells cannot preserve wrapper precedence; omit -l/--login or use a non-login shell"
+        );
+    }
+    let home = env::var_os("HOME").context("HOME is not set for bash startup")?;
+    let user_rc = env::var_os("SM_BASH_USER_RC")
+        .unwrap_or_else(|| Path::new(&home).join(".bashrc").into_os_string());
+    let managed_bash_env = env::var_os("SM_BASH_USER_ENV");
+    let original_bash_env = env::var_os("BASH_ENV");
+    let bash_env_was_unset = env::var_os("SM_BASH_USER_ENV_UNSET").is_some()
+        || (managed_bash_env.is_none() && original_bash_env.is_none());
+    let user_bash_env = managed_bash_env.or(original_bash_env).unwrap_or_default();
+    command
+        .arg("--rcfile")
+        .arg(generation.join("shell/bash/bashrc"))
+        .env("BASH_ENV", generation.join("shell/bash/bashenv"))
+        .env("SM_BASH_USER_RC", user_rc)
+        .env("SM_BASH_USER_ENV", user_bash_env)
+        .env("SM_WRAPPER_BIN", wrapper_bin);
+    if bash_env_was_unset {
+        command.env("SM_BASH_USER_ENV_UNSET", "1");
+    } else {
+        command.env_remove("SM_BASH_USER_ENV_UNSET");
+    }
+    Ok(())
+}
+
+fn bash_login_requested(shell_args: &[OsString]) -> bool {
+    let mut arguments = shell_args.iter();
+    while let Some(argument) = arguments.next() {
+        let text = argument.to_string_lossy();
+        if text == "--" {
+            return false;
+        }
+        if text == "--login" {
+            return true;
+        }
+        if text == "-c" {
+            let _ = arguments.next();
+            return false;
+        }
+        if text.starts_with('-') && !text.starts_with("--") && text[1..].contains('l') {
+            return true;
+        }
+        if !text.starts_with('-') {
+            return false;
+        }
+    }
+    false
 }
 
 pub fn exec_with_lease(paths: &AppPaths, generation: &str, command: &[OsString]) -> Result<()> {
@@ -166,6 +283,8 @@ fn ensure_generation(
         let bin = staging.join("bin");
         fs::create_dir(&skills)?;
         fs::create_dir(&bin)?;
+        write_zsh_startup_files(&staging.join("shell/zsh"))?;
+        write_bash_startup_files(&staging.join("shell/bash"))?;
         for (name, source) in selected {
             symlink_dir(source, &skills.join(name))?;
         }
@@ -196,6 +315,97 @@ fn ensure_generation(
     }
     result.with_context(|| format!("failed to create generation {id}"))?;
     Ok(destination)
+}
+
+fn write_zsh_startup_files(directory: &Path) -> Result<()> {
+    fs::create_dir_all(directory)?;
+    for name in [".zshenv", ".zprofile", ".zshrc", ".zlogin", ".zlogout"] {
+        let restore_condition = match name {
+            ".zshenv" => "[[ ! -o interactive && ! -o login ]]",
+            ".zshrc" => "[[ ! -o login ]]",
+            ".zlogin" | ".zlogout" => "true",
+            _ => "false",
+        };
+        let script = format!(
+            "# Generated by sm.\n\
+_sm_generation_zdotdir=$ZDOTDIR\n\
+if [[ $SM_ZSH_USER_ZDOTDIR_UNSET == 1 ]]; then\n\
+  unset ZDOTDIR\n\
+else\n\
+  ZDOTDIR=$SM_ZSH_USER_DOTDIR\n\
+fi\n\
+_sm_user_zdotdir=${{ZDOTDIR:-$HOME}}\n\
+if [[ -r \"$_sm_user_zdotdir/{name}\" ]]; then\n\
+  source \"$_sm_user_zdotdir/{name}\"\n\
+fi\n\
+if (( ${{+ZDOTDIR}} )); then\n\
+  SM_ZSH_USER_DOTDIR=$ZDOTDIR\n\
+  unset SM_ZSH_USER_ZDOTDIR_UNSET\n\
+else\n\
+  SM_ZSH_USER_DOTDIR=$HOME\n\
+  SM_ZSH_USER_ZDOTDIR_UNSET=1\n\
+  export SM_ZSH_USER_ZDOTDIR_UNSET\n\
+fi\n\
+export SM_ZSH_USER_DOTDIR\n\
+ZDOTDIR=$_sm_generation_zdotdir\n\
+if [[ -n $SM_WRAPPER_BIN ]]; then\n\
+  path=(\"$SM_WRAPPER_BIN\" ${{path:#\"$SM_WRAPPER_BIN\"}})\n\
+  export PATH\n\
+fi\n\
+if {restore_condition}; then\n\
+  if [[ $SM_ZSH_USER_ZDOTDIR_UNSET == 1 ]]; then\n\
+    unset ZDOTDIR\n\
+  else\n\
+    ZDOTDIR=$SM_ZSH_USER_DOTDIR\n\
+  fi\n\
+fi\n\
+unset _sm_generation_zdotdir _sm_user_zdotdir\n"
+        );
+        fs::write(directory.join(name), script)?;
+    }
+    Ok(())
+}
+
+fn write_bash_startup_files(directory: &Path) -> Result<()> {
+    fs::create_dir_all(directory)?;
+    let restore_bash_env = "if [[ $SM_BASH_USER_ENV_UNSET == 1 ]]; then\n\
+  unset BASH_ENV\n\
+else\n\
+  BASH_ENV=$SM_BASH_USER_ENV\n\
+  export BASH_ENV\n\
+fi\n";
+    let capture_bash_env = "if [[ -n ${BASH_ENV+x} ]]; then\n\
+  SM_BASH_USER_ENV=$BASH_ENV\n\
+  unset SM_BASH_USER_ENV_UNSET\n\
+else\n\
+  SM_BASH_USER_ENV=\n\
+  SM_BASH_USER_ENV_UNSET=1\n\
+  export SM_BASH_USER_ENV_UNSET\n\
+fi\n\
+export SM_BASH_USER_ENV\n";
+    let restore_wrapper = "if [[ -n $SM_WRAPPER_BIN ]]; then\n\
+  PATH=$SM_WRAPPER_BIN${PATH:+:$PATH}\n\
+  export PATH\n\
+fi\n";
+
+    let bashrc = format!(
+        "# Generated by sm.\n{restore_bash_env}\
+if [[ -r $SM_BASH_USER_RC ]]; then\n\
+  source \"$SM_BASH_USER_RC\"\n\
+fi\n\
+{capture_bash_env}{restore_wrapper}"
+    );
+    fs::write(directory.join("bashrc"), bashrc)?;
+
+    let bashenv = format!(
+        "# Generated by sm.\n{restore_bash_env}\
+if [[ $SM_BASH_USER_ENV_UNSET != 1 && -n $SM_BASH_USER_ENV && -r $SM_BASH_USER_ENV ]]; then\n\
+  source \"$SM_BASH_USER_ENV\"\n\
+fi\n\
+{capture_bash_env}{restore_wrapper}"
+    );
+    fs::write(directory.join("bashenv"), bashenv)?;
+    Ok(())
 }
 
 fn write_wrapper(
@@ -243,6 +453,7 @@ fn generation_id(
     current_exe: &Path,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
+    hasher.update(b"generation-v4-shell-startup\0");
     hasher.update(target_name.as_bytes());
     hasher.update(current_exe.as_os_str().as_encoded_bytes());
     hasher.update(template.command.as_os_str().as_encoded_bytes());

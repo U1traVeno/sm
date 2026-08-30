@@ -72,6 +72,14 @@ $ sm export --profile common --skill research/web-search
 
 This copies to `.skills/` by default. The project owns the copies; `sm` does not update or delete them later.
 
+Import directories produced by an external installer, replacing selected existing skills explicitly:
+
+```console
+$ sm import --profile coding --from .agents/skills --replace
+```
+
+`sm` remains package-manager agnostic. See [Project Import and Export](docs/project-skills.md) for a composable `npx skills` workflow.
+
 ## Documentation
 
 - [English documentation](docs/README.md)
@@ -94,4 +102,4 @@ English topics:
 - Agent-specific behavior is data in target templates, not branches in the core.
 - Successful mutating commands are silent.
 - Diagnostics go to standard error.
-- Existing files are never silently merged or overwritten.
+- Existing files are never silently merged or overwritten; replacement must be explicit.

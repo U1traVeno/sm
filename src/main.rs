@@ -19,7 +19,9 @@ use config::Config;
 use materialize::{apply_links, managed_status, plan_links};
 use paths::AppPaths;
 use profiles::ProfileStore;
-use state::{TargetLock, disable_profiles, enable_profiles, load_enabled, save_enabled};
+use state::{
+    ProfileLock, TargetLock, disable_profiles, enable_profiles, load_enabled, save_enabled,
+};
 
 fn main() -> ExitCode {
     match run() {
@@ -159,9 +161,23 @@ fn run() -> Result<ExitCode> {
             profile,
             skills,
             source,
+            replace,
             dry_run,
         } => {
-            transfer::import_skills(&store, &profile, Path::new(&source), &skills, dry_run)?;
+            let profile_state = paths.profile_state(&profile)?;
+            let _lock = if dry_run {
+                None
+            } else {
+                Some(ProfileLock::acquire(&profile_state)?)
+            };
+            transfer::import_skills(
+                &store,
+                &profile,
+                Path::new(&source),
+                &skills,
+                replace,
+                dry_run,
+            )?;
         }
         Command::Gc { dry_run } => shell::gc(&paths, dry_run)?,
         Command::Exec {

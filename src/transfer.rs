@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 
@@ -32,24 +33,35 @@ pub fn import_skills(
     profile: &str,
     source: &Path,
     selected_names: &[String],
+    replace: bool,
     dry_run: bool,
 ) -> Result<()> {
     validate_component(profile, "profile")?;
     let source = absolute_path(source)?;
     let sources = collect_import_sources(&source, selected_names)?;
     let destination = store.root().join(profile);
-    preflight_destination(sources.keys(), &destination)?;
+    preflight_import_destination(sources.keys(), &destination, replace)?;
     if dry_run {
         for (name, source) in &sources {
+            let destination = destination.join(name);
             println!(
-                "copy\t{}\t{}",
+                "{}\t{}\t{}",
+                if entry_exists(&destination)? {
+                    "replace"
+                } else {
+                    "copy"
+                },
                 source.display(),
-                destination.join(name).display()
+                destination.display()
             );
         }
         return Ok(());
     }
-    copy_batch(&sources, &destination)
+    if replace {
+        replace_batch(&sources, &destination)
+    } else {
+        copy_batch(&sources, &destination)
+    }
 }
 
 fn collect_import_sources(
@@ -110,6 +122,143 @@ fn preflight_destination<'a>(
         }
     }
     Ok(())
+}
+
+fn preflight_import_destination<'a>(
+    names: impl Iterator<Item = &'a String>,
+    destination: &Path,
+    replace: bool,
+) -> Result<()> {
+    if let Ok(metadata) = fs::symlink_metadata(destination)
+        && (!metadata.is_dir() || metadata.file_type().is_symlink())
+    {
+        bail!(
+            "copy destination is not a directory: {}",
+            destination.display()
+        );
+    }
+    for name in names {
+        let path = destination.join(name);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to inspect import destination {}", path.display())
+                });
+            }
+        };
+        if !replace {
+            bail!("copy destination already exists: {}", path.display());
+        }
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            bail!("replace destination is not a directory: {}", path.display());
+        }
+    }
+    Ok(())
+}
+
+fn entry_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
+    }
+}
+
+fn replace_batch(sources: &BTreeMap<String, PathBuf>, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination)
+        .with_context(|| format!("failed to create {}", destination.display()))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let transaction = format!("{}.{}", std::process::id(), nonce);
+    let staging = destination.join(format!(".sm-import-{transaction}"));
+    let backup = destination.join(format!(".sm-import-backup-{transaction}"));
+    if entry_exists(&staging)? || entry_exists(&backup)? {
+        bail!(
+            "import transaction path already exists in {}",
+            destination.display()
+        );
+    }
+
+    fs::create_dir(&staging)?;
+    let staged = (|| -> Result<()> {
+        for (name, source) in sources {
+            copy_tree(source, &staging.join(name))?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = staged {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+
+    fs::create_dir(&backup)?;
+    let mut installed = Vec::new();
+    let mut backed_up = Vec::new();
+    let committed = (|| -> Result<()> {
+        for name in sources.keys() {
+            let final_path = destination.join(name);
+            if entry_exists(&final_path)? {
+                fs::rename(&final_path, backup.join(name))
+                    .with_context(|| format!("failed to back up imported skill {name}"))?;
+                backed_up.push(name.clone());
+            }
+            fs::rename(staging.join(name), &final_path)
+                .with_context(|| format!("failed to install imported skill {name}"))?;
+            installed.push(name.clone());
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = committed {
+        let rollback = rollback_import(destination, &backup, &installed, &backed_up);
+        let _ = fs::remove_dir_all(&staging);
+        if let Err(rollback_error) = rollback {
+            return Err(error.context(format!(
+                "import rollback failed: {rollback_error:#}; backup remains at {}",
+                backup.display()
+            )));
+        }
+        let _ = fs::remove_dir(&backup);
+        return Err(error);
+    }
+
+    fs::remove_dir(&staging)?;
+    fs::remove_dir_all(&backup)
+        .with_context(|| format!("failed to remove import backup {}", backup.display()))
+}
+
+fn rollback_import(
+    destination: &Path,
+    backup: &Path,
+    installed: &[String],
+    backed_up: &[String],
+) -> Result<()> {
+    let mut failures = Vec::new();
+    for name in installed.iter().rev() {
+        let path = destination.join(name);
+        if let Err(error) = fs::remove_dir_all(&path) {
+            failures.push(format!("failed to remove {}: {error}", path.display()));
+        }
+    }
+    for name in backed_up.iter().rev() {
+        let source = backup.join(name);
+        let destination = destination.join(name);
+        if let Err(error) = fs::rename(&source, &destination) {
+            failures.push(format!(
+                "failed to restore {}: {error}",
+                destination.display()
+            ));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!("{}", failures.join("; "))
+    }
 }
 
 fn copy_batch(sources: &BTreeMap<String, PathBuf>, destination: &Path) -> Result<()> {

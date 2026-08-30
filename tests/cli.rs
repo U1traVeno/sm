@@ -177,7 +177,7 @@ fn help_is_complete_for_every_public_command() {
         ("apply", "without changing enabled profiles"),
         ("shell", "Without --profile"),
         ("export", "one-time ownership transfer"),
-        ("import", "one-time ownership transfer"),
+        ("import", "unless --replace is explicit"),
         ("gc", "PID-based directory leases"),
     ];
     for (command, expected) in commands {
@@ -308,6 +308,442 @@ fn export_and_import_transfer_ownership_without_overwrite() {
     let output = fixture.command().arg("export").output().unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("requires at least one"));
+}
+
+#[test]
+fn import_replace_is_explicit_scoped_and_profile_locked() {
+    let fixture = Fixture::new();
+    fixture.add_skill("imported", "rust", "old\n");
+    fixture.add_skill("imported", "keep", "keep\n");
+    let source = fixture.project.join("incoming/rust");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("origin"), "new\n").unwrap();
+
+    let output = fixture
+        .command()
+        .args(["import", "--profile", "imported", "--from", "incoming"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("already exists"));
+    assert_eq!(
+        fs::read_to_string(fixture.sm_home.join("profiles/imported/rust/origin")).unwrap(),
+        "old\n"
+    );
+
+    let dry_run = fixture.run(&[
+        "import",
+        "--profile",
+        "imported",
+        "--from",
+        "incoming",
+        "--replace",
+        "--dry-run",
+    ]);
+    assert!(String::from_utf8_lossy(&dry_run.stdout).starts_with("replace\t"));
+    assert_eq!(
+        fs::read_to_string(fixture.sm_home.join("profiles/imported/rust/origin")).unwrap(),
+        "old\n"
+    );
+
+    let stale_lock = fixture
+        .state_home
+        .join("sm/profiles/imported/lock/owner-99999999");
+    fs::create_dir_all(&stale_lock).unwrap();
+    fixture.run(&[
+        "import",
+        "--profile",
+        "imported",
+        "--from",
+        "incoming",
+        "--replace",
+    ]);
+    assert_eq!(
+        fs::read_to_string(fixture.sm_home.join("profiles/imported/rust/origin")).unwrap(),
+        "new\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.sm_home.join("profiles/imported/keep/origin")).unwrap(),
+        "keep\n"
+    );
+    assert!(
+        !fixture
+            .state_home
+            .join("sm/profiles/imported/lock")
+            .exists()
+    );
+}
+
+#[test]
+fn import_replace_rejects_invalid_destinations_and_stages_before_mutation() {
+    let fixture = Fixture::new();
+    let external = fixture.project.join("external");
+    fs::create_dir_all(&external).unwrap();
+    fs::write(external.join("keep"), "external\n").unwrap();
+    let profile = fixture.sm_home.join("profiles/imported");
+    fs::create_dir_all(&profile).unwrap();
+    symlink(&external, profile.join("linked")).unwrap();
+    let linked_source = fixture.project.join("linked-source/linked");
+    fs::create_dir_all(&linked_source).unwrap();
+    fs::write(linked_source.join("origin"), "new\n").unwrap();
+
+    let output = fixture
+        .command()
+        .args([
+            "import",
+            "--profile",
+            "imported",
+            "--from",
+            "linked-source",
+            "--replace",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("replace destination is not a directory")
+    );
+    assert!(profile.join("linked").is_symlink());
+    assert_eq!(
+        fs::read_to_string(external.join("keep")).unwrap(),
+        "external\n"
+    );
+
+    fixture.add_skill("imported", "rust", "old\n");
+    let broken_source = fixture.project.join("broken-source/rust");
+    fs::create_dir_all(&broken_source).unwrap();
+    let _socket = std::os::unix::net::UnixListener::bind(broken_source.join("socket")).unwrap();
+    let output = fixture
+        .command()
+        .args([
+            "import",
+            "--profile",
+            "imported",
+            "--from",
+            "broken-source",
+            "--replace",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported file type"));
+    assert_eq!(
+        fs::read_to_string(fixture.sm_home.join("profiles/imported/rust/origin")).unwrap(),
+        "old\n"
+    );
+    let hidden_transactions = fs::read_dir(&profile)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".sm-import-")
+        })
+        .count();
+    assert_eq!(hidden_transactions, 0);
+}
+
+#[test]
+fn zsh_startup_files_cannot_shadow_the_generated_wrapper() {
+    let Some(zsh) = [Path::new("/bin/zsh"), Path::new("/usr/bin/zsh")]
+        .into_iter()
+        .find(|path| path.is_file())
+    else {
+        return;
+    };
+
+    let fixture = Fixture::new();
+    fixture.add_skill("coding", "rust", "rust\n");
+
+    let agent = fixture.home.join("fake-agent");
+    let output_prefix = fixture.home.join("agent-output");
+    fs::write(
+        &agent,
+        "#!/bin/sh\nprintf 'real\\n' > \"$OUTPUT.kind\"\nprintf '%s\\n' \"$STARTUP_ENV\" \"$STARTUP_RC\" \"$ZDOTDIR\" > \"$OUTPUT.startup\"\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&agent).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&agent, permissions).unwrap();
+    fixture.write_config(Some((&agent, &output_prefix)));
+
+    let shadow_dir = fixture.home.join("shadow-bin");
+    fs::create_dir_all(&shadow_dir).unwrap();
+    let shadow_agent = shadow_dir.join("fake-agent");
+    let shadow_output = fixture.home.join("shadow-output");
+    fs::write(
+        &shadow_agent,
+        format!(
+            "#!/bin/sh\nprintf 'shadow\\n' > {:?}\n",
+            shadow_output.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&shadow_agent).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&shadow_agent, permissions).unwrap();
+
+    let zdotdir = fixture.home.join("zsh-config");
+    fs::create_dir_all(&zdotdir).unwrap();
+    fs::write(zdotdir.join(".zshenv"), "export STARTUP_ENV=loaded\n").unwrap();
+    fs::write(
+        zdotdir.join(".zshrc"),
+        format!(
+            "export PATH={:?}:$PATH\nexport STARTUP_RC=loaded\n",
+            shadow_dir.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let output = fixture
+        .command()
+        .env("SHELL", zsh)
+        .env("ZDOTDIR", &zdotdir)
+        .args([
+            "shell",
+            "fake",
+            "--profile",
+            "coding",
+            "--",
+            "-ic",
+            "fake-agent",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "zsh shell failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(output_prefix.with_extension("kind")).unwrap(),
+        "real\n"
+    );
+    assert_eq!(
+        fs::read_to_string(output_prefix.with_extension("startup")).unwrap(),
+        format!("loaded\nloaded\n{}\n", zdotdir.display())
+    );
+    assert!(!shadow_output.exists());
+}
+
+#[test]
+fn bash_startup_files_cannot_shadow_the_generated_wrapper() {
+    let fixture = Fixture::new();
+    fixture.add_skill("coding", "rust", "rust\n");
+
+    let agent = fixture.home.join("fake-agent");
+    let output_prefix = fixture.home.join("agent-output");
+    fs::write(
+        &agent,
+        "#!/bin/sh\nprintf 'real\\n' > \"$OUTPUT.kind\"\nprintf '%s\\n' \"$STARTUP_BASHRC\" \"$STARTUP_BASH_ENV\" \"${BASH_ENV-<unset>}\" > \"$OUTPUT.startup\"\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&agent).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&agent, permissions).unwrap();
+    fixture.write_config(Some((&agent, &output_prefix)));
+
+    let shadow_dir = fixture.home.join("shadow-bin");
+    fs::create_dir_all(&shadow_dir).unwrap();
+    let shadow_agent = shadow_dir.join("fake-agent");
+    let shadow_output = fixture.home.join("shadow-output");
+    fs::write(
+        &shadow_agent,
+        format!(
+            "#!/bin/sh\nprintf 'shadow\\n' > {:?}\n",
+            shadow_output.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&shadow_agent).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&shadow_agent, permissions).unwrap();
+
+    fs::write(
+        fixture.home.join(".bashrc"),
+        format!(
+            "export PATH={:?}:$PATH\nexport STARTUP_BASHRC=loaded\n",
+            shadow_dir.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let bash_env = fixture.home.join("user-bash-env");
+    fs::write(
+        &bash_env,
+        format!(
+            "export PATH={:?}:$PATH\nexport STARTUP_BASH_ENV=loaded\n",
+            shadow_dir.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let interactive = fixture
+        .command()
+        .env("SHELL", "/bin/bash")
+        .env("BASH_ENV", &bash_env)
+        .args([
+            "shell",
+            "fake",
+            "--profile",
+            "coding",
+            "--",
+            "-ic",
+            "fake-agent",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        interactive.status.success(),
+        "interactive bash failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&interactive.stdout),
+        String::from_utf8_lossy(&interactive.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(output_prefix.with_extension("kind")).unwrap(),
+        "real\n"
+    );
+    assert_eq!(
+        fs::read_to_string(output_prefix.with_extension("startup")).unwrap(),
+        format!("loaded\n\n{}\n", bash_env.display())
+    );
+    assert!(!shadow_output.exists());
+
+    fs::remove_file(output_prefix.with_extension("kind")).unwrap();
+    fs::remove_file(output_prefix.with_extension("startup")).unwrap();
+    let non_interactive = fixture
+        .command()
+        .env("SHELL", "/bin/bash")
+        .env("BASH_ENV", &bash_env)
+        .args([
+            "shell",
+            "fake",
+            "--profile",
+            "coding",
+            "--",
+            "-c",
+            "fake-agent",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        non_interactive.status.success(),
+        "non-interactive bash failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&non_interactive.stdout),
+        String::from_utf8_lossy(&non_interactive.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(output_prefix.with_extension("kind")).unwrap(),
+        "real\n"
+    );
+    assert_eq!(
+        fs::read_to_string(output_prefix.with_extension("startup")).unwrap(),
+        format!("\nloaded\n{}\n", bash_env.display())
+    );
+    assert!(!shadow_output.exists());
+
+    let login = fixture
+        .command()
+        .env("SHELL", "/bin/bash")
+        .args(["shell", "fake", "--profile", "coding", "--", "-l"])
+        .output()
+        .unwrap();
+    assert!(!login.status.success());
+    assert!(
+        String::from_utf8_lossy(&login.stderr)
+            .contains("bash login shells cannot preserve wrapper precedence")
+    );
+}
+
+#[test]
+fn fish_config_cannot_shadow_the_generated_wrapper() {
+    let fish = std::env::var_os("SM_TEST_FISH")
+        .map(PathBuf::from)
+        .or_else(|| {
+            [
+                Path::new("/opt/homebrew/bin/fish"),
+                Path::new("/usr/bin/fish"),
+            ]
+            .into_iter()
+            .find(|path| path.is_file())
+            .map(Path::to_path_buf)
+        });
+    let Some(fish) = fish else {
+        return;
+    };
+
+    let fixture = Fixture::new();
+    fixture.add_skill("coding", "rust", "rust\n");
+
+    let agent = fixture.home.join("fake-agent");
+    let output_prefix = fixture.home.join("agent-output");
+    fs::write(
+        &agent,
+        "#!/bin/sh\nprintf 'real\\n' > \"$OUTPUT.kind\"\nprintf '%s\\n' \"$STARTUP_FISH\" > \"$OUTPUT.startup\"\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&agent).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&agent, permissions).unwrap();
+    fixture.write_config(Some((&agent, &output_prefix)));
+
+    let shadow_dir = fixture.home.join("shadow-bin");
+    fs::create_dir_all(&shadow_dir).unwrap();
+    let shadow_agent = shadow_dir.join("fake-agent");
+    let shadow_output = fixture.home.join("shadow-output");
+    fs::write(
+        &shadow_agent,
+        format!(
+            "#!/bin/sh\nprintf 'shadow\\n' > {:?}\n",
+            shadow_output.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&shadow_agent).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&shadow_agent, permissions).unwrap();
+
+    let fish_config = fixture.config_home.join("fish");
+    fs::create_dir_all(&fish_config).unwrap();
+    fs::write(
+        fish_config.join("config.fish"),
+        format!(
+            "set -gx PATH {:?} $PATH\nset -gx STARTUP_FISH loaded\n",
+            shadow_dir.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let output = fixture
+        .command()
+        .env("SHELL", &fish)
+        .args([
+            "shell",
+            "fake",
+            "--profile",
+            "coding",
+            "--",
+            "-ic",
+            "fake-agent",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "fish shell failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(output_prefix.with_extension("kind")).unwrap(),
+        "real\n"
+    );
+    assert_eq!(
+        fs::read_to_string(output_prefix.with_extension("startup")).unwrap(),
+        "loaded\n"
+    );
+    assert!(!shadow_output.exists());
 }
 
 #[test]

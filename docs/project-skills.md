@@ -72,25 +72,75 @@ Use a different source directory with `--from`:
 $ sm import --profile project-tools --from .agents/skills
 ```
 
+Replace selected existing skill directories explicitly:
+
+```console
+$ sm import --profile project-tools --from .agents/skills --replace
+```
+
 The destination profile is created when it does not exist. Imported skills become ordinary directories under:
 
 ```text
 $SM_HOME/profiles/<profile>/<skill>/
 ```
 
+## Composing with Package Installers
+
+`sm` does not invoke package installers. An installer can write into a temporary project directory, followed by `sm import --replace`. This zsh function composes `npx skills` with the default persistent target:
+
+```zsh
+sm-add() {
+  if (( $# < 2 )); then
+    print -u2 'usage: sm-add PROFILE SOURCE [SKILLS-ADD-OPTION...]'
+    return 2
+  fi
+
+  local profile=$1 arg tmp
+  shift
+  for arg in "$@"; do
+    case $arg in
+      -g|--global|--global=*|-a|--agent|--agent=*|--all|--copy)
+        print -u2 "sm-add: unsupported skills add option: $arg"
+        return 2
+        ;;
+    esac
+  done
+
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/sm-add.XXXXXXXX") || return 1
+  {
+    (
+      cd "$tmp" &&
+        command npx --yes skills add "$@" --agent universal --yes
+    ) || return
+    command sm import \
+      --profile "$profile" \
+      --from "$tmp/.agents/skills" \
+      --replace || return
+    if ! command sm apply; then
+      print -u2 "sm-add: imported into profile $profile, but sm apply failed"
+      return 1
+    fi
+  } always {
+    command rm -rf -- "$tmp"
+  }
+}
+```
+
+The first argument belongs to `sm`; the remaining arguments are passed to `skills add`. Scope, agent, all-agent, and copy options are rejected because they can bypass the temporary canonical directory. Set `SM_TARGET` when applying to a non-default target:
+
+```console
+$ SM_TARGET=pi sm-add development vercel-labs/agent-skills --skill web-design-guidelines
+```
+
+The function imports inventory but does not enable the profile or change precedence. Run `sm enable <profile>` explicitly the first time. The temporary `skills-lock.json` is discarded, so updates repeat the original `sm-add` command rather than using `npx skills update`. If import succeeds but apply fails, the imported profile remains; resolve the target problem and run `sm apply` again.
+
 ## Collision Rules
 
-Before copying anything, `sm` validates every source and destination name. If any destination entry already exists, the entire operation fails without copying.
+Before copying anything, `sm` validates every source and destination name. Without `--replace`, any existing destination entry fails the entire operation without copying.
 
-`sm` does not:
+With `--replace`, each selected existing destination must be a real directory. New content is fully staged before destination changes begin. Ordinary failures during installation roll back the selected names. Replacement does not merge directories, delete profile entries absent from the source, compare versions, or synchronize earlier copies.
 
-- merge directories;
-- overwrite existing files;
-- compare versions;
-- update earlier copies;
-- provide a force flag.
-
-Use ordinary tools such as `diff -r`, `rm -r`, and `mv` to resolve a conflict, then rerun the command.
+Use ordinary tools such as `diff -r` and `rm -r` when you need comparison, merging, or deletion semantics.
 
 ## Copy Semantics
 

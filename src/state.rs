@@ -13,18 +13,41 @@ pub struct EnabledProfile {
     pub name: String,
 }
 
-pub struct TargetLock {
+struct StateLock {
     path: PathBuf,
+}
+
+pub struct TargetLock {
+    _lock: StateLock,
+}
+
+pub struct ProfileLock {
+    _lock: StateLock,
 }
 
 impl TargetLock {
     pub fn acquire(target_state: &Path) -> Result<Self> {
-        fs::create_dir_all(target_state)
-            .with_context(|| format!("failed to create target state {}", target_state.display()))?;
-        let path = target_state.join("lock");
+        Ok(Self {
+            _lock: StateLock::acquire(target_state, "target")?,
+        })
+    }
+}
+
+impl ProfileLock {
+    pub fn acquire(profile_state: &Path) -> Result<Self> {
+        Ok(Self {
+            _lock: StateLock::acquire(profile_state, "profile")?,
+        })
+    }
+}
+
+impl StateLock {
+    fn acquire(state: &Path, kind: &str) -> Result<Self> {
+        fs::create_dir_all(state)
+            .with_context(|| format!("failed to create {kind} state {}", state.display()))?;
+        let path = state.join("lock");
         for _ in 0..4 {
-            let temporary =
-                target_state.join(format!("lock.tmp.{}.{}", std::process::id(), nonce()));
+            let temporary = state.join(format!("lock.tmp.{}.{}", std::process::id(), nonce()));
             fs::create_dir(&temporary)?;
             fs::create_dir(temporary.join(format!("owner-{}", std::process::id())))?;
             match fs::rename(&temporary, &path) {
@@ -33,25 +56,25 @@ impl TargetLock {
                     let _ = fs::remove_dir_all(&temporary);
                     if !path.exists() {
                         return Err(error).with_context(|| {
-                            format!("failed to lock target state {}", path.display())
+                            format!("failed to lock {kind} state {}", path.display())
                         });
                     }
                 }
             }
 
             if lock_has_live_or_unknown_owner(&path)? {
-                bail!("target is locked by another sm process: {}", path.display());
+                bail!("{kind} is locked by another sm process: {}", path.display());
             }
-            let stale = target_state.join(format!("lock.stale.{}.{}", std::process::id(), nonce()));
+            let stale = state.join(format!("lock.stale.{}.{}", std::process::id(), nonce()));
             if fs::rename(&path, &stale).is_ok() {
                 fs::remove_dir_all(stale)?;
             }
         }
-        bail!("failed to acquire target lock: {}", path.display())
+        bail!("failed to acquire {kind} lock: {}", path.display())
     }
 }
 
-impl Drop for TargetLock {
+impl Drop for StateLock {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);
     }

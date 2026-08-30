@@ -15,6 +15,16 @@ $ sm shell pi --profile common --profile research
 
 The child shell inherits the current working directory and ordinary environment. `sm` prepends a private wrapper directory to `PATH`. Only the configured command is wrapped; other commands behave normally.
 
+`sm` applies a startup strategy for the detected shell:
+
+- **zsh:** a generation-local `ZDOTDIR` shim sources the user's original startup files, restores wrapper precedence, and restores the original `ZDOTDIR` state before commands run.
+- **bash:** a generated `--rcfile` sources the user's `.bashrc` for an interactive non-login shell; generated `BASH_ENV` handling does the same for non-interactive commands. The user's original `BASH_ENV` state is restored afterward.
+- **fish:** `--init-command` restores wrapper precedence after `config.fish` has run.
+
+These strategies preserve aliases, functions, options, and environment changes without requiring an `sm` block in user startup files. Bash login shells (`-l` or `--login`) are rejected because Bash does not read `--rcfile` for them; use the default non-login child shell.
+
+Other shells receive the wrapper-first inherited `PATH`; their startup files must not place a competing executable ahead of it.
+
 Exit the child shell to end the scope:
 
 ```console

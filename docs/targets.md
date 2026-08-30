@@ -76,6 +76,8 @@ The template is data, not a shell command. `sm` performs no shell interpolation,
 
 Before starting the child shell, `sm` resolves `command` against the original `PATH`. It then creates a wrapper with the same command name in a private directory placed first on the child shell's `PATH`. The wrapper executes the resolved command with configured arguments, configured environment, and any user-provided arguments.
 
+zsh, Bash, and Fish children receive shell-specific startup handling that restores wrapper precedence after their user configuration runs. zsh uses a generated `ZDOTDIR`, Bash uses `--rcfile`/`BASH_ENV`, and Fish uses `--init-command`. Bash login shells are rejected because they do not read `--rcfile`. Other shell implementations rely on their startup files preserving the inherited wrapper-first PATH.
+
 For the Pi example, typing this inside the child shell:
 
 ```console

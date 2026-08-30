@@ -34,12 +34,15 @@ ${XDG_STATE_HOME:-~/.local/state}/sm/
       enabled/
         <sequence>-<profile>/
       lock/
+  profiles/
+    <profile>/
+      lock/
   leases/
     <generation-id>/
       ...
 ```
 
-Enabled markers are empty directories. A per-target lock directory serializes persistent updates. Lease entries prevent `sm gc` from deleting generations used by live child shells.
+Enabled markers are empty directories. Per-target locks serialize persistent updates, and per-profile locks serialize imports into the same profile. Lock directories exist only while an operation is running. Lease entries prevent `sm gc` from deleting generations used by live child shells.
 
 State is machine-local and must not be committed to the skill repository.
 
@@ -53,9 +56,19 @@ ${XDG_CACHE_HOME:-~/.cache}/sm/
         <skill> -> $SM_HOME/profiles/<profile>/<skill>
       bin/
         <configured-command-wrapper>
+      shell/
+        bash/
+          bashrc
+          bashenv
+        zsh/
+          .zshenv
+          .zprofile
+          .zshrc
+          .zlogin
+          .zlogout
 ```
 
-Generation IDs are opaque implementation details. A generation's link membership and targets do not change after creation. Skill contents remain mutable through the source symlinks.
+Generation IDs are opaque implementation details. A generation's link membership and targets do not change after creation. Skill contents remain mutable through the source symlinks. The generated Bash and zsh files source the user's real startup files and then restore command-wrapper precedence; Fish uses an equivalent `--init-command`. These files are cache data, not user configuration.
 
 The complete cache can be reconstructed. Use `sm gc` for normal cleanup; do not remove a generation used by a live child shell.
 

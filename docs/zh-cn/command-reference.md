@@ -132,10 +132,11 @@ sm import \
   --profile PROFILE \
   [--skill SKILL]... \
   [--from DIRECTORY] \
+  [--replace] \
   [--dry-run]
 ```
 
-默认来源是 `.skills/`。没有 `--skill` 时导入全部直接 skill 子目录。目标 profile 不存在时会创建。任意目标名称已存在都会使整个操作失败。
+默认来源是 `.skills/`。没有 `--skill` 时导入全部直接 skill 子目录。目标 profile 不存在时会创建。任意目标名称已存在都会使整个操作失败，除非显式指定 `--replace`。替换只影响选中的名称，要求已有目标是实体目录，并保留 profile 中的其他所有条目。
 
 ## `sm gc`
 
@@ -157,6 +158,7 @@ disable\t<TARGET>\t<PROFILE>
 link\t<SOURCE>\t<DESTINATION>
 unlink\t<DESTINATION>
 copy\t<SOURCE>\t<DESTINATION>
+replace\t<SOURCE>\t<DESTINATION>
 remove\t<PATH>
 ```
 
@@ -168,4 +170,4 @@ remove\t<PATH>
 - `1`：运行失败，例如 profile 不存在、发生冲突、target 无效或复制错误。
 - `2`：命令行用法错误。
 
-可预期的失败不会修改 target 或目的地。操作系统级中断可能留下只协调了一部分的持久 target；请重新运行相同命令或使用 `sm apply`。
+可预期的失败不会修改 target 或目的地。操作系统级中断可能留下只协调了一部分的持久 target，或隐藏的 import staging/backup 目录。target 更新可重新运行 `sm apply`；删除中断的 import 数据前应先检查对应 profile。

@@ -158,8 +158,8 @@ pub enum Command {
 
     /// Copy project skills into a profile.
     #[command(
-        long_about = "Copy project-owned skills into one profile.\n\nThe source defaults to .skills/. With no --skill options, every immediate skill directory is imported. With --skill, only the named source entries are copied. The destination profile is created when absent. Any existing destination name fails the entire operation.\n\nImport is a one-time ownership transfer: the destination profile owns the copies and sm does not synchronize them with the project.",
-        after_long_help = "Examples:\n  sm import --profile project-tools\n  sm import --profile project-tools --skill deploy --skill release-notes\n  sm import --profile coding --from .agents/skills\n  sm import --profile coding --dry-run"
+        long_about = "Copy project-owned skills into one profile.\n\nThe source defaults to .skills/. With no --skill options, every immediate skill directory is imported. With --skill, only the named source entries are copied. The destination profile is created when absent. Existing destination names fail the entire operation unless --replace is explicit. Replacement affects selected names only and never removes other profile entries.\n\nImport is a one-time ownership transfer: the destination profile owns the copies and sm does not synchronize them with the project.",
+        after_long_help = "Examples:\n  sm import --profile project-tools\n  sm import --profile project-tools --skill deploy --skill release-notes\n  sm import --profile coding --from .agents/skills --replace\n  sm import --profile coding --dry-run"
     )]
     Import {
         /// Destination profile, created when absent.
@@ -171,6 +171,9 @@ pub enum Command {
         /// Project-owned source directory.
         #[arg(long = "from", default_value = ".skills", value_name = "DIRECTORY")]
         source: OsString,
+        /// Replace existing selected skill directories.
+        #[arg(long)]
+        replace: bool,
         /// Validate and print planned copies without changing files.
         #[arg(long)]
         dry_run: bool,

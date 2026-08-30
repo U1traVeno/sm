@@ -76,6 +76,8 @@ shell 配置接受：
 
 启动子 shell 前，`sm` 会使用原始 `PATH` 解析 `command`，然后在私有目录中创建同名 wrapper，并把该目录放在子 shell 的 `PATH` 最前面。wrapper 使用已解析命令、配置参数、配置环境和用户输入参数执行真实命令。
 
+zsh、Bash 和 Fish 子 shell 会使用各自的启动适配，在用户配置执行后恢复 wrapper 优先级：zsh 使用生成的 `ZDOTDIR`，Bash 使用 `--rcfile`/`BASH_ENV`，Fish 使用 `--init-command`。Bash login shell 不读取 `--rcfile`，因此会被拒绝。其他 shell 要求其启动文件保留继承的 wrapper-first PATH。
+
 对于 Pi 示例，在子 shell 中输入：
 
 ```console

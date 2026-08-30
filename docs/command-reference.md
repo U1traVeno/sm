@@ -132,10 +132,11 @@ sm import \
   --profile PROFILE \
   [--skill SKILL]... \
   [--from DIRECTORY] \
+  [--replace] \
   [--dry-run]
 ```
 
-The default source is `.skills/`. With no `--skill`, import every immediate skill directory. The destination profile is created if absent. Existing destination names fail the entire operation.
+The default source is `.skills/`. With no `--skill`, import every immediate skill directory. The destination profile is created if absent. Existing destination names fail the entire operation unless `--replace` is explicit. Replacement affects selected names only, requires existing destinations to be real directories, and preserves every other profile entry.
 
 ## `sm gc`
 
@@ -157,6 +158,7 @@ disable\t<TARGET>\t<PROFILE>
 link\t<SOURCE>\t<DESTINATION>
 unlink\t<DESTINATION>
 copy\t<SOURCE>\t<DESTINATION>
+replace\t<SOURCE>\t<DESTINATION>
 remove\t<PATH>
 ```
 
@@ -168,4 +170,4 @@ Paths are absolute.
 - `1`: operational failure such as a missing profile, collision, invalid target, or copy error.
 - `2`: command-line usage error.
 
-Expected failures make no target or destination changes. An operating-system interruption may leave a partially reconciled persistent target; rerun the same command or use `sm apply`.
+Expected failures make no target or destination changes. An operating-system interruption may leave a partially reconciled persistent target or hidden import staging/backup directory. Rerun `sm apply` for a target update; inspect the affected profile before removing interrupted import data.

@@ -15,6 +15,16 @@ $ sm shell pi --profile common --profile research
 
 子 shell 继承当前工作目录和普通环境。`sm` 会在 `PATH` 前添加一个私有 wrapper 目录。只有已配置命令会被包装，其他命令行为不变。
 
+`sm` 会根据检测到的 shell 采用对应启动策略：
+
+- **zsh：**generation 专属的 `ZDOTDIR` shim 会 source 用户原有的启动文件、恢复 wrapper 优先级，并在执行命令前恢复原来的 `ZDOTDIR` 状态。
+- **bash：**交互式非 login shell 使用生成的 `--rcfile` source 用户 `.bashrc`；非交互命令通过生成的 `BASH_ENV` 做相同处理，之后恢复用户原有的 `BASH_ENV` 状态。
+- **fish：**使用 `--init-command`，在 `config.fish` 执行后恢复 wrapper 优先级。
+
+这些策略会保留 aliases、functions、options 和环境变更，用户启动文件无需加入 sm 专用代码。Bash login shell（`-l` 或 `--login`）会被拒绝，因为 Bash 不会为它读取 `--rcfile`；请使用默认的非 login 子 shell。
+
+其他 shell 会继承 wrapper 优先的 `PATH`；它们的启动文件不得把同名可执行文件放到 wrapper 前面。
+
 退出子 shell 即可结束作用域：
 
 ```console

@@ -34,12 +34,15 @@ ${XDG_STATE_HOME:-~/.local/state}/sm/
       enabled/
         <sequence>-<profile>/
       lock/
+  profiles/
+    <profile>/
+      lock/
   leases/
     <generation-id>/
       ...
 ```
 
-启用标记是空目录。每个 target 的 lock 目录用于串行化持久更新。lease 条目阻止 `sm gc` 删除仍被活跃子 shell 使用的 generation。
+启用标记是空目录。每个 target 的 lock 用于串行化持久更新，每个 profile 的 lock 用于串行化对同一 profile 的 import。lock 目录只在操作运行期间存在。lease 条目阻止 `sm gc` 删除仍被活跃子 shell 使用的 generation。
 
 状态只属于当前机器，不应提交到 skill 仓库。
 
@@ -53,9 +56,19 @@ ${XDG_CACHE_HOME:-~/.cache}/sm/
         <skill> -> $SM_HOME/profiles/<profile>/<skill>
       bin/
         <configured-command-wrapper>
+      shell/
+        bash/
+          bashrc
+          bashenv
+        zsh/
+          .zshenv
+          .zprofile
+          .zshrc
+          .zlogin
+          .zlogout
 ```
 
-generation ID 是不透明的实现细节。generation 创建后，其链接成员和目标不会改变。skill 内容仍可通过源符号链接改变。
+generation ID 是不透明的实现细节。generation 创建后，其链接成员和目标不会改变。skill 内容仍可通过源符号链接改变。生成的 Bash 和 zsh 文件会 source 用户真实的启动文件，再恢复 command wrapper 的优先级；Fish 使用等效的 `--init-command`。这些文件是缓存数据，不是用户配置。
 
 全部缓存都可以重建。正常清理请使用 `sm gc`；不要删除活跃子 shell 正在使用的 generation。
 

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::util::{normalize_path, user_home};
+use crate::util::{normalize_path, user_home, validate_component};
 
 #[derive(Clone, Debug)]
 pub struct AppPaths {
@@ -38,6 +38,11 @@ impl AppPaths {
 
     pub fn target_state(&self, target: &str) -> PathBuf {
         self.state.join("targets").join(target)
+    }
+
+    pub fn profile_state(&self, profile: &str) -> Result<PathBuf> {
+        validate_component(profile, "profile")?;
+        Ok(self.state.join("profiles").join(profile))
     }
 
     pub fn generations(&self) -> PathBuf {
