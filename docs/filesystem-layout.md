@@ -2,20 +2,23 @@
 
 Language: **English** | [简体中文](zh-cn/filesystem-layout.md)
 
-`sm` separates synchronized skill content, user configuration, machine-local state, and disposable cache data.
+sm separates inventory, configuration, process coordination, generated cache data, and persistent projections.
 
-## Skill Repository
+## Inventory
 
 ```text
 ${SM_HOME:-~/.sm}/
   profiles/
     <profile>/
+      .smtag
       <skill>/
         SKILL.md
         ...
 ```
 
-This is the only directory intended for Git synchronization. `sm` does not require it to be a Git repository and never invokes Git.
+Profile directories and their `.smtag` files are the source of inventory and activation truth. This tree may be managed with Git; sm never invokes Git.
+
+A missing `.smtag` is initialized to `true`. Hidden profile entries are metadata and are not skills. Skill contents are opaque.
 
 ## Configuration
 
@@ -23,28 +26,25 @@ This is the only directory intended for Git synchronization. `sm` does not requi
 ${XDG_CONFIG_HOME:-~/.config}/sm/config.toml
 ```
 
-Configuration contains the default target and generic target/template data. See [Targets and Templates](targets.md).
+Configuration contains named targets. Each target may have a persistent `skills_dir`, a shell adapter, or both. `sm adopt` edits only the selected target's `skills_dir` while preserving existing TOML formatting and comments.
 
 ## Local State
 
 ```text
 ${XDG_STATE_HOME:-~/.local/state}/sm/
+  inventory/
+    lock/
   targets/
     <target>/
-      enabled/
-        <sequence>-<profile>/
-      lock/
-  profiles/
-    <profile>/
       lock/
   leases/
     <generation-id>/
-      ...
+      <pid-nonce>/
 ```
 
-Enabled markers are empty directories. Per-target locks serialize persistent updates, and per-profile locks serialize imports into the same profile. Lock directories exist only while an operation is running. Lease entries prevent `sm gc` from deleting generations used by live child shells.
+Lock directories exist only while an operation is running. Inventory locking serializes tag/import/update changes. Target locks serialize apply operations. Lease entries prevent garbage collection of generations used by live shells or wrapped commands.
 
-State is machine-local and must not be committed to the skill repository.
+There is no persistent activation state under XDG state. Legacy `targets/<target>/enabled/` directories are removed when the inventory is initialized.
 
 ## Cache
 
@@ -55,43 +55,28 @@ ${XDG_CACHE_HOME:-~/.cache}/sm/
       skills/
         <skill> -> $SM_HOME/profiles/<profile>/<skill>
       bin/
-        <configured-command-wrapper>
+        <agent-wrapper>
       shell/
         bash/
-          bashrc
-          bashenv
         zsh/
-          .zshenv
-          .zprofile
-          .zshrc
-          .zlogin
-          .zlogout
 ```
 
-Generation IDs are opaque implementation details. A generation's link membership and targets do not change after creation. Skill contents remain mutable through the source symlinks. The generated Bash and zsh files source the user's real startup files and then restore command-wrapper precedence; Fish uses an equivalent `--init-command`. These files are cache data, not user configuration.
+Generation IDs represent the selected skill paths, shell adapters, wrapper executable paths, and sm executable. Membership is immutable after generation creation, while linked skill contents remain mutable.
 
-The complete cache can be reconstructed. Use `sm gc` for normal cleanup; do not remove a generation used by a live child shell.
+Use `sm gc` to remove complete generations without live leases.
 
-## Persistent Agent Targets
+## Persistent Targets
 
-Persistent target directories are outside `sm`'s own state and are declared in configuration. For example:
+Configured target directories exist outside sm state:
 
 ```text
-~/.pi/agent/skills/
-  code-review -> ~/.sm/profiles/coding/code-review
+~/.agents/skills/
+  code-review -> ~/.sm/profiles/matt/code-review
   web-search  -> ~/.sm/profiles/research/web-search
-  manually-installed-skill/
 ```
 
-`sm` preserves unmanaged entries. It only removes symlinks whose stored target identifies a skill under `$SM_HOME/profiles`.
+Every target receives the same globally active set. Normal apply manages links under `$SM_HOME/profiles` and rejects real directories. Force apply removes all non-hidden real directories, then installs desired links. Ordinary files, hidden entries, and unrelated external links remain unmanaged.
 
-## Project Copies
+## Project and Installer Copies
 
-The default import/export directory is relative to the current project:
-
-```text
-<project>/.skills/
-  <skill>/
-```
-
-These are ordinary copied directories, not `sm` state. The project owns exported copies, and `sm` does not later synchronize or remove them.
+Import, update, and export operate on ordinary copied directories. Import and update leave their sources in place; force apply may later remove real directories when the source is itself a configured target.

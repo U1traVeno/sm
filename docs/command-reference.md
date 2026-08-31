@@ -2,172 +2,174 @@
 
 Language: **English** | [简体中文](zh-cn/command-reference.md)
 
-## Common Conventions
+## Conventions
 
-- `-t` is short for `--target`.
-- Paths beginning with `~` are expanded where configuration allows paths.
-- Profile and target names are single directory components.
-- A skill reference has the form `<profile>/<skill>`.
-- Mutating commands are silent on success unless `--dry-run` is used.
-- Primary output goes to standard output; diagnostics go to standard error.
+- Profile, skill, and target names are one non-hidden directory component.
+- A skill reference is `<profile>/<skill>`.
+- Global activation comes from `<profile>/.smtag`.
+- Successful mutations are silent except one-time migration diagnostics.
+- `--dry-run` validates and prints operations without mutation.
+- `-t` is short for `--target`; `-f` is short for `--force`.
 
 ## `sm profiles`
 
-List profile names, one per line in bytewise lexical order.
+List profile names:
 
 ```text
 sm profiles
 ```
 
-## `sm skills`
+Create profiles:
 
-List profile-qualified skill names.
+```text
+sm profiles new PROFILE... [--disabled] [--dry-run]
+```
+
+New profiles are enabled unless `--disabled` is supplied.
+
+## `sm skills`
 
 ```text
 sm skills [PROFILE...]
 ```
 
-With no profile arguments, list skills from every profile. Output is one `<profile>/<skill>` per line in bytewise lexical order.
+Print `<profile>/<skill>` lines. With no arguments, inspect every profile.
 
 ## `sm targets`
-
-List configured target names, one per line.
 
 ```text
 sm targets
 ```
 
+List configured target names.
+
 ## `sm enabled`
 
-Print enabled profiles for one persistent target from lowest to highest precedence.
-
 ```text
-sm enabled [-t TARGET]
+sm enabled
 ```
 
-## `sm status`
+List globally enabled profiles in lexical order.
 
-Print the currently materialized winning skills for one persistent target.
+## `sm status`
 
 ```text
 sm status [-t TARGET]
 ```
 
-Each line is tab-separated:
+Without a target, each tab-separated line is:
 
 ```text
-<skill-name>\t<absolute-source>\t<absolute-destination>
+<target>\t<skill>\t<source>\t<destination>
 ```
 
-An empty target produces no output and exits successfully.
+With a target, the first column is omitted.
 
-## `sm enable`
-
-Enable profiles for one persistent target.
+## `sm enable` and `sm disable`
 
 ```text
-sm enable PROFILE... [-t TARGET] [--dry-run]
+sm enable PROFILE... [--dry-run]
+sm disable PROFILE... [--dry-run]
 ```
 
-Profiles are processed left to right. Each named profile moves to highest precedence. The resulting union is preflighted and materialized as managed symlinks.
-
-## `sm disable`
-
-Disable profiles for one persistent target.
-
-```text
-sm disable PROFILE... [-t TARGET] [--dry-run]
-```
-
-Profiles are processed left to right. Disabling an already-disabled profile is successful and still reconciles the target.
+Write `true` or `false` to profile tags. These commands never modify targets. Enabling a profile that conflicts with another enabled owner fails before writing tags.
 
 ## `sm apply`
 
-Reconcile one persistent target without changing enabled profiles or precedence.
-
 ```text
-sm apply [-t TARGET] [--dry-run]
+sm apply [-t TARGET] [-f|--force] [--dry-run]
 ```
 
-Use this after changing or updating profile directories, or to repair an interrupted target update.
+Project globally enabled skills to all persistent targets, or one selected target. All selected targets are preflighted before mutation.
+
+Without force, any non-hidden real directory blocks the entire operation. With force, those directories are removed. Managed links are repaired or removed as needed. Files, hidden entries, and unrelated external symlinks are preserved unless they block a desired name.
 
 ## `sm shell`
 
-Start an isolated child shell using a target's generic shell template.
-
 ```text
-sm shell TARGET \
+sm shell \
+  [--target TARGET]... \
   [--profile PROFILE]... \
   [--skill PROFILE/SKILL]... \
-  [-- SHELL-ARGUMENT...]
+  [-- SHELL_ARGUMENT...]
 ```
 
-Selection behavior:
-
-- with any `--profile`, use only explicitly selected profiles plus `--skill` additions;
-- without `--profile`, inherit the target's persistent enabled profiles and add `--skill` selections.
-
-Arguments after `--` are passed to the child shell, not the wrapped agent command.
-
-## `sm export`
-
-Copy profiles or individual skills into a project-owned directory.
-
-```text
-sm export \
-  [--profile PROFILE]... \
-  [--skill PROFILE/SKILL]... \
-  [--to DIRECTORY] \
-  [--dry-run]
-```
-
-At least one selector is required. The default destination is `.skills/`. Existing destination names fail the entire operation.
+Start a child shell with one stable generation. Without target filters, wrap every configured shell adapter. Without profiles, inherit globally enabled profiles. Any profile option replaces inheritance; skill options add individual entries.
 
 ## `sm import`
-
-Copy project-owned skills into one profile.
 
 ```text
 sm import \
   --profile PROFILE \
   [--skill SKILL]... \
   [--from DIRECTORY] \
-  [--replace] \
+  [--create] [--replace] [--dry-run]
+```
+
+Copy source directories into one profile. The default source is `.skills`. Import may add skills and explicitly create a profile, but leaves all source directories in place. Managed source links are skipped; other source symlinks are rejected.
+
+## `sm update`
+
+```text
+sm update \
+  --from DIRECTORY \
+  [--skill SKILL]... \
+  [--profile PROFILE | --all] \
   [--dry-run]
 ```
 
-The default source is `.skills/`. With no `--skill`, import every immediate skill directory. The destination profile is created if absent. Existing destination names fail the entire operation unless `--replace` is explicit. Replacement affects selected names only, requires existing destinations to be real directories, and preserves every other profile entry.
+Replace only existing same-named inventory skills. Unknown source names are skipped and never imported. Duplicate inventory names require one profile or all existing owners. Source directories remain in place.
+
+## `sm export`
+
+```text
+sm export \
+  [--profile PROFILE]... \
+  [--skill PROFILE/SKILL]... \
+  [--to DIRECTORY] [--dry-run]
+```
+
+Copy selected inventory skills to a project-owned directory. At least one selector is required. Existing destination names are never overwritten.
+
+## `sm adopt`
+
+```text
+sm adopt TARGET DIRECTORY [--dry-run]
+```
+
+Register a normalized absolute `skills_dir` for a target while preserving existing TOML formatting and shell configuration. Adopt does not create the target directory or run apply.
 
 ## `sm gc`
-
-Remove unleased shell generations.
 
 ```text
 sm gc [--dry-run]
 ```
 
-Live generations are never removed.
+Remove generated isolated-shell directories without live leases.
 
-## Dry-Run Output
+## Dry-Run Operations
 
-`--dry-run` performs validation and prints the planned operations without mutation. Output is tab-separated, one operation per line. Operation names are lowercase:
+Output is tab-separated and may include:
 
 ```text
-enable\t<TARGET>\t<PROFILE>
-disable\t<TARGET>\t<PROFILE>
-link\t<SOURCE>\t<DESTINATION>
-unlink\t<DESTINATION>
-copy\t<SOURCE>\t<DESTINATION>
-replace\t<SOURCE>\t<DESTINATION>
-remove\t<PATH>
+tag\ttrue\t<path>
+create-profile\t<enabled>\t<path>
+enable\t<profile>
+disable\t<profile>
+copy\t<source>\t<destination>
+replace\t<source>\t<destination>
+update\t<source>\t<destination>
+skip\t<source>
+adopt\t<target>\t<directory>
+link\t<source>\t<destination>
+unlink\t<destination>
+remove\t<path>
 ```
-
-Paths are absolute.
 
 ## Exit Status
 
-- `0`: success, including idempotent no-op operations.
-- `1`: operational failure such as a missing profile, collision, invalid target, or copy error.
+- `0`: success, including idempotent no-op operations;
+- `1`: operational or validation failure;
 - `2`: command-line usage error.
 
-Expected failures make no target or destination changes. An operating-system interruption may leave a partially reconciled persistent target or hidden import staging/backup directory. Rerun `sm apply` for a target update; inspect the affected profile before removing interrupted import data.
+Expected validation failures occur before inventory or selected targets change. An OS interruption during apply may leave some planned links reconciled; rerun `sm apply`.

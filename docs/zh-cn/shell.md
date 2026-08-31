@@ -2,104 +2,85 @@
 
 语言：[English](../shell.md) | **简体中文**
 
-`sm shell` 启动一个交互式子 shell，使其中一个已配置命令使用稳定的、会话专属的 skill 集合。
+`sm shell` 启动一个子命令 shell，让配置过的 agent 命令使用稳定、会话专属的 skill generation。它不会修改持久 targets。
 
-它不会修改父 shell，也不会替换固定的全局 skill 目录。
-
-## 基本用法
+## 基本使用
 
 ```console
-$ sm shell pi --profile common --profile research
+sm shell --profile matt
 (sm) $ pi
+(sm) $ other-agent
 ```
 
-子 shell 继承当前工作目录和普通环境。`sm` 会在 `PATH` 前添加一个私有 wrapper 目录。只有已配置命令会被包装，其他命令行为不变。
-
-`sm` 会根据检测到的 shell 采用对应启动策略：
-
-- **zsh：**generation 专属的 `ZDOTDIR` shim 会 source 用户原有的启动文件、恢复 wrapper 优先级，并在执行命令前恢复原来的 `ZDOTDIR` 状态。
-- **bash：**交互式非 login shell 使用生成的 `--rcfile` source 用户 `.bashrc`；非交互命令通过生成的 `BASH_ENV` 做相同处理，之后恢复用户原有的 `BASH_ENV` 状态。
-- **fish：**使用 `--init-command`，在 `config.fish` 执行后恢复 wrapper 优先级。
-
-这些策略会保留 aliases、functions、options 和环境变更，用户启动文件无需加入 sm 专用代码。Bash login shell（`-l` 或 `--login`）会被拒绝，因为 Bash 不会为它读取 `--rcfile`；请使用默认的非 login 子 shell。
-
-其他 shell 会继承 wrapper 优先的 `PATH`；它们的启动文件不得把同名可执行文件放到 wrapper 前面。
-
-退出子 shell 即可结束作用域：
+没有 `--target` 时，所有配置过的 shell adapters 都会被包装。需要时可以限制：
 
 ```console
-(sm) $ exit
-$
+sm shell --target pi --profile matt
 ```
 
-已经从子 shell 启动的 Agent 会继续使用其 generation，直到 Agent 退出。
+两个被选 adapter 不能使用同一个 command basename。发生冲突时显式选择一个 target。
 
-## Profile 选择
+## Skill 选择
 
-只要出现至少一个 `--profile`，profile 集合就是显式集合，不继承持久启用状态：
+没有 `--profile` 时，generation 继承全局启用 profiles：
 
 ```console
-$ sm shell pi --profile common --profile coding
+sm shell
 ```
 
-没有 `--profile` 时，`sm shell` 继承该 target 的持久启用 profiles：
+出现任何显式 profile 后，只使用显式集合：
 
 ```console
-$ sm shell pi
+sm shell --profile common --profile matt
 ```
 
-可以用带 profile 限定的引用添加单个 skill：
+可以追加单个 profile-qualified skill：
 
 ```console
-$ sm shell pi --skill research/web-search
+sm shell --skill research/web-search
 ```
 
-没有 `--profile` 时，它会在继承集合上增加 `research/web-search`。存在一个或多个 `--profile` 时，它会加入显式集合。
+没有显式 profile 时，它追加到全局集合；否则追加到隔离集合。Selectors 从左到右解析，后者可以临时覆盖同名 skill。
 
-selector 从左到右解析。重名时，后出现的 selector 胜出。
+## 子 Shell 行为
 
-## 稳定 Generations
+子 shell 继承当前工作目录和普通环境。`--` 后的参数传给子 shell：
 
-generation 是存储在缓存目录中的符号链接映射：
+```console
+sm shell --target pi -- -c 'pi --model sonnet'
+```
+
+sm 把 generation wrappers 放在 `PATH` 首位，并设置：
 
 ```text
-~/.cache/sm/generations/<generation-id>/
-  skills/
-    code-review -> ~/.sm/profiles/coding/code-review
-    web-search  -> ~/.sm/profiles/research/web-search
+SM_SKILLS_DIR=<generation>/skills
+SM_GENERATION=<generation-id>
 ```
 
-generation ID 表示已解析的源路径和优先级。创建完成后，其成员和链接目标不会原地修改。不同的解析结果会创建或复用另一个 generation。
+只有配置过的 command basename 会被包装，其他命令不受影响。没有 adapter 的 agent 继续使用其普通全局行为。
 
-因此，两个子 shell 不会覆盖彼此可见的 skill membership。之后改变持久启用 profile，也不会使既有 generation 路径失效。
+## 启动文件
 
-skill 内容本身并非不可变。generation 使用符号链接，因此编辑或删除源 skill 会改变既有 generation 所看到的内容。当运行中的 Agent 需要可复现 skill 正文时，不要改写 skill 仓库。
+- **zsh：** 生成的 shim 会 source 用户真实启动文件，再恢复 wrapper 的 PATH 优先级。
+- **Bash：** 生成的 `--rcfile` 和 `BASH_ENV` 保留用户启动状态并恢复优先级。Login shell 会被拒绝，因为它绕过 `--rcfile`。
+- **Fish：** 使用 `--init-command` 在 `config.fish` 后恢复优先级。
+- **其他 shell：** 接收 wrapper-first PATH，其启动文件必须自行保留该顺序。
 
-## 与 Agent 解耦
+## Generations 与 Leases
 
-`sm shell` 并非 Pi 专用。它使用 [Targets 与模板](targets.md) 中的通用命令模板。
+```text
+~/.cache/sm/generations/<id>/
+  skills/
+    code-review -> ~/.sm/profiles/matt/code-review
+  bin/
+    pi
+    other-agent
+```
 
-只有能够通过 argv 或环境变量接收 skill 目录的命令才支持隔离 shell。如果命令只能扫描固定全局目录，`sm shell` 会针对该 target 失败；请改用持久 `enable` 和 `disable`。
+Generation 创建后不原地改变成员或 wrapper 集合，因此多个子 shell 可以并发使用不同 skills。活跃子 shell 和包装命令通过 PID lease 防止 generation 被回收。
 
-## 垃圾回收
-
-子 shell 存活期间，`sm` 会持有 generation lease。`sm gc` 只删除没有活跃 lease 的 generation：
+清理没有 lease 的 generation：
 
 ```console
-$ sm gc --dry-run
-remove	/Users/me/.cache/sm/generations/old-id
-$ sm gc
+sm gc
 ```
-
-垃圾回收只会删除完整 generation 目录，不会原地编辑 generation。
-
-## 失败行为
-
-以下情况会在子 shell 启动前失败：
-
-- target 未知；
-- target 没有 shell 模板；
-- 选中的 profile 或 skill 不存在；
-- 重名解析在 generation 路径中产生非受管冲突；
-- 配置的命令无法解析；
-- generation 创建不完整。

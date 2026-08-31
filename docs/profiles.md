@@ -1,119 +1,80 @@
-# Profiles and Activation
+# Profiles and Global Activation
 
 Language: **English** | [简体中文](zh-cn/profiles.md)
 
-## Profile Layout
+## Layout
 
-A profile is a directory under `$SM_HOME/profiles`:
-
-```text
-$SM_HOME/profiles/<profile>/<skill>/
-```
-
-Only immediate, non-hidden directories are skills. A profile must not use files or symlinks as membership entries. Content below each skill directory is opaque to `sm`.
-
-For example:
+A profile is an immediate directory under `$SM_HOME/profiles`:
 
 ```text
-~/.sm/profiles/
-  common/
-    web-search/
-    code-review/
-  backend/
-    database-migrations/
-    code-review/
+$SM_HOME/profiles/<profile>/
+  .smtag
+  <skill>/
+    SKILL.md
 ```
 
-A skill that conceptually belongs to several groups should live in a separate profile such as `common`. `sm` does not maintain a central skill catalog or profile membership links.
+A skill is an immediate non-hidden directory. sm treats its contents as opaque and does not parse `SKILL.md`. Profile and skill entries must be real directories, not symlinks.
 
-## Enabling Profiles
+Deleting a profile directory deletes that profile and its activation state. Creating a profile directory creates a profile immediately.
 
-Profiles are enabled independently for each target:
+## `.smtag`
+
+`.smtag` contains exactly one Boolean value, with an optional trailing newline:
+
+```text
+true
+```
+
+or:
+
+```text
+false
+```
+
+`true` means the profile belongs to the globally active set. Every persistent target receives this same set.
+
+When sm discovers a profile without `.smtag`, it creates the file with `true` and reports the initialization on standard error. Dry-run commands report the planned tag without writing it. Any other tag value is an error.
+
+Create profiles explicitly:
 
 ```console
-$ sm enable common backend --target pi
+sm profiles new matt
+sm profiles new archive --disabled
 ```
 
-Arguments are processed from left to right. A profile enabled later has higher precedence. Enabling an already-enabled profile raises it to the highest precedence without duplicating it.
-
-`sm enable` performs these steps:
-
-1. Validate every named profile and all immediate skill entries.
-2. Resolve the union of enabled profiles.
-3. Check the target for unmanaged collisions.
-4. Record the new precedence using filesystem marker directories.
-5. Materialize the winning skills as symlinks.
-
-Expected validation failures happen before the target is changed.
-
-## Disabling Profiles
+Change global activation:
 
 ```console
-$ sm disable backend --target pi
+sm enable matt
+sm disable archive
 ```
 
-Disabling removes the profile from that target's enabled set and rematerializes the remaining union. The command is idempotent: disabling a profile that is already disabled still reconciles the target and succeeds silently.
+These commands only update `.smtag`. They do not modify targets. Run `sm apply` when the inventory is ready.
 
 ## Duplicate Skill Names
 
-The immediate directory name is the skill identity. `sm` does not compare `SKILL.md` frontmatter or file contents.
-
-Given this order:
+Different profiles may store the same skill name, but two globally enabled profiles may not expose that name simultaneously:
 
 ```text
-common
-backend
+profiles/old/code-review/
+profiles/matt/code-review/
 ```
 
-and these directories:
+This inventory is valid if at most one owner is enabled. `sm enable`, an enabled import, and `sm apply` reject an active duplicate before changing anything.
 
-```text
-profiles/common/code-review/
-profiles/backend/code-review/
-```
+An isolated shell may explicitly select profiles with duplicate skill names. There, selector order is temporary and later selectors win; no precedence is persisted.
 
-`backend/code-review` wins because `backend` was enabled later. If `backend` is disabled, `common/code-review` becomes visible again.
+## Manual Editing
 
-## Managed and Unmanaged Entries
+The filesystem is authoritative. You may:
 
-`sm` manages only symlinks whose stored target points to a skill under `$SM_HOME/profiles/<profile>/<skill>`.
+- create or delete profile directories;
+- move skill directories between profiles;
+- edit `.smtag` directly;
+- edit skill contents in place.
 
-It does not remove or replace:
+Run `sm apply` after membership or activation changes. Run `sm update --from DIRECTORY` when an external installer has produced newer copies of already managed skills.
 
-- regular files;
-- regular directories;
-- symlinks outside `$SM_HOME/profiles`;
-- unrelated broken symlinks.
+## Legacy Activation State
 
-If an unmanaged entry has the same name as a selected skill, the operation fails before changing the target. Resolve the collision explicitly and rerun the command.
-
-## Local State
-
-Enabled state uses directories rather than a manifest:
-
-```text
-~/.local/state/sm/targets/pi/enabled/
-  00000000000000000001-common/
-  00000000000000000002-backend/
-```
-
-The numeric prefix stores precedence. Marker directories are empty. Re-enabling a profile replaces its old marker with a new highest sequence.
-
-This state is machine-local and must not be committed to the skill repository.
-
-## Synchronizing the Repository
-
-Run Git separately:
-
-```console
-$ git -C ~/.sm pull --ff-only
-$ sm enable common --target pi
-```
-
-Re-enabling reconciles the target and raises `common` to highest precedence. To reconcile without changing precedence, run:
-
-```console
-$ sm apply --target pi
-```
-
-`sm apply` uses the existing marker order and repairs managed links without changing enabled state.
+Older releases stored per-target enabled marker directories under the XDG state directory. The first non-dry-run inventory command removes those obsolete markers. They are never consulted by the global activation model.

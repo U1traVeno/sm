@@ -2,104 +2,87 @@
 
 Language: **English** | [简体中文](zh-cn/shell.md)
 
-`sm shell` starts a child interactive shell in which one configured command uses a stable, session-specific skill set.
-
-It does not modify the parent shell and does not replace fixed global skill directories.
+`sm shell` starts a child command shell where configured agent commands use a stable, session-specific skill generation. It never modifies persistent targets.
 
 ## Basic Use
 
 ```console
-$ sm shell pi --profile common --profile research
+sm shell --profile matt
 (sm) $ pi
+(sm) $ other-agent
 ```
 
-The child shell inherits the current working directory and ordinary environment. `sm` prepends a private wrapper directory to `PATH`. Only the configured command is wrapped; other commands behave normally.
-
-`sm` applies a startup strategy for the detected shell:
-
-- **zsh:** a generation-local `ZDOTDIR` shim sources the user's original startup files, restores wrapper precedence, and restores the original `ZDOTDIR` state before commands run.
-- **bash:** a generated `--rcfile` sources the user's `.bashrc` for an interactive non-login shell; generated `BASH_ENV` handling does the same for non-interactive commands. The user's original `BASH_ENV` state is restored afterward.
-- **fish:** `--init-command` restores wrapper precedence after `config.fish` has run.
-
-These strategies preserve aliases, functions, options, and environment changes without requiring an `sm` block in user startup files. Bash login shells (`-l` or `--login`) are rejected because Bash does not read `--rcfile` for them; use the default non-login child shell.
-
-Other shells receive the wrapper-first inherited `PATH`; their startup files must not place a competing executable ahead of it.
-
-Exit the child shell to end the scope:
+With no `--target`, every configured shell adapter is wrapped. Limit wrappers when needed:
 
 ```console
-(sm) $ exit
-$
+sm shell --target pi --profile matt
 ```
 
-Agents already started from the child shell continue to use their generation until they exit.
+Two selected adapters may not use the same command basename. Select one target explicitly to resolve such a conflict.
 
-## Profile Selection
+## Skill Selection
 
-When at least one `--profile` is present, the profile set is explicit and does not inherit persistent enabled profiles:
+Without `--profile`, the generation inherits globally enabled profiles:
 
 ```console
-$ sm shell pi --profile common --profile coding
+sm shell
 ```
 
-When no `--profile` is present, `sm shell` inherits the target's persistent enabled profiles:
+Any explicit profile makes the profile set isolated instead:
 
 ```console
-$ sm shell pi
+sm shell --profile common --profile matt
 ```
 
-Individual skills may be added with a profile-qualified reference:
+Add individual skills with profile-qualified references:
 
 ```console
-$ sm shell pi --skill research/web-search
+sm shell --skill research/web-search
 ```
 
-With no `--profile`, this adds `research/web-search` to the inherited enabled set. With one or more `--profile`, it adds the skill to the explicit set.
+Without an explicit profile this adds to the global set. With explicit profiles it adds to that isolated set. Selectors are resolved left to right; later selectors win temporary duplicate names.
 
-Selectors are resolved from left to right. Later selectors win duplicate directory names.
+## Child Shell Behavior
 
-## Stable Generations
+The child inherits the current working directory and normal environment. Arguments after `--` are passed to the child shell:
 
-A generation is a symlink mapping stored under the cache directory:
+```console
+sm shell --target pi -- -c 'pi --model sonnet'
+```
+
+sm places generation wrappers first in `PATH` and sets:
 
 ```text
-~/.cache/sm/generations/<generation-id>/
-  skills/
-    code-review -> ~/.sm/profiles/coding/code-review
-    web-search  -> ~/.sm/profiles/research/web-search
+SM_SKILLS_DIR=<generation>/skills
+SM_GENERATION=<generation-id>
 ```
 
-The generation ID represents the resolved source paths and precedence. Once created, its membership and link targets are never changed in place. A different resolved set creates or reuses a different generation.
+Only configured command basenames are wrapped. Other commands behave normally. Agent commands without a shell adapter continue to use their ordinary global behavior.
 
-This prevents two child shells from overwriting each other's visible skill membership. It also keeps a generation path valid when persistent profiles are later enabled or disabled.
+## Startup Files
 
-The skill contents are not immutable. Because generation entries are symlinks, editing or removing a source skill changes what an existing generation sees. Do not rewrite the skill repository while a running agent requires a reproducible skill body.
+- **zsh:** generated startup shims source the user's real zsh files and restore wrapper precedence.
+- **Bash:** a generated `--rcfile` and `BASH_ENV` source user startup state and restore wrapper precedence. Login shells are rejected because they bypass `--rcfile`.
+- **Fish:** `--init-command` restores wrapper precedence after `config.fish`.
+- **Other shells:** receive wrapper-first `PATH`; their startup files must preserve it.
 
-## Agent Independence
+## Generations and Leases
 
-`sm shell` is not Pi-specific. It uses the generic command template documented in [Targets and Templates](targets.md).
+A generation is stored under the cache:
 
-A command supports isolated shells only if it can receive a skill directory through argv or environment. If it only scans a fixed global directory, `sm shell` fails for that target. Use persistent `enable` and `disable` instead.
+```text
+~/.cache/sm/generations/<id>/
+  skills/
+    code-review -> ~/.sm/profiles/matt/code-review
+  bin/
+    pi
+    other-agent
+```
 
-## Garbage Collection
+Its membership and wrapper set never change in place. Multiple child shells can therefore use different generations concurrently. Live child shells and wrapped commands hold PID leases.
 
-While the child shell is alive, `sm` holds a lease on its generation. `sm gc` removes only generations without an active lease:
+Remove unleased generations with:
 
 ```console
-$ sm gc --dry-run
-remove	/Users/me/.cache/sm/generations/old-id
-$ sm gc
+sm gc
 ```
-
-Garbage collection removes complete generation directories. It never edits a generation in place.
-
-## Failure Behavior
-
-`sm shell` fails before starting the child shell when:
-
-- the target is unknown;
-- the target has no shell template;
-- a selected profile or skill does not exist;
-- duplicate resolution produces an unmanaged conflict inside the generation path;
-- the configured command cannot be resolved;
-- generation creation is incomplete.

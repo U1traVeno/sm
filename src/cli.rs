@@ -6,9 +6,9 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "sm",
     version,
-    about = "Activate skill profiles on demand",
-    long_about = "Activate skill profiles on demand.\n\nsm keeps the complete skill inventory under $SM_HOME/profiles and exposes only the union of enabled profiles to each configured target. Persistent activation uses managed symlinks; isolated shells use stable generated symlink sets.\n\nsm does not install skill packages, parse SKILL.md, or run Git. Successful mutating commands are silent unless --dry-run is used.",
-    after_long_help = "Common workflows:\n  sm profiles\n  sm enable common coding --target pi\n  sm shell pi --profile common --profile research\n  sm export --profile common --skill research/web-search\n\nLocations:\n  Skills:  ${SM_HOME:-~/.sm}/profiles/\n  Config:  ${XDG_CONFIG_HOME:-~/.config}/sm/config.toml\n  State:   ${XDG_STATE_HOME:-~/.local/state}/sm/\n  Cache:   ${XDG_CACHE_HOME:-~/.cache}/sm/\n\nRun 'sm <command> --help' for command-specific behavior and examples.",
+    about = "Manage global skill profiles and project them to agent directories",
+    long_about = "Manage global skill profiles and project them to agent directories.\n\nProfiles live under $SM_HOME/profiles and store global activation in .smtag. Inventory commands never modify configured targets; sm apply is the sole persistent projection operation. Isolated shells use stable generated link sets without changing global targets.\n\nsm does not run package installers, parse SKILL.md, or invoke Git. Successful mutations are silent unless --dry-run is used.",
+    after_long_help = "Common workflows:\n  sm profiles new matt\n  sm import --profile matt --from ~/.agents/skills --create\n  sm update --from ~/.agents/skills\n  sm apply --force\n  sm shell --profile matt\n\nRun 'sm <command> --help' for command-specific behavior and examples.",
     arg_required_else_help = true,
     subcommand_required = true,
     propagate_version = true,
@@ -21,171 +21,181 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// List available profiles.
+    /// List profiles or create new profiles.
     #[command(
-        long_about = "List available profiles.\n\nA profile is an immediate, non-hidden directory under $SM_HOME/profiles. Names are written to standard output in bytewise lexical order, one per line. A missing or empty profiles directory produces no output and succeeds.",
-        after_long_help = "Examples:\n  sm profiles\n  sm profiles | grep '^work-'"
+        long_about = "List profiles or create new profiles.\n\nWith no subcommand, profile names are printed in bytewise lexical order. A profile is an immediate non-hidden directory under $SM_HOME/profiles. Missing .smtag files are initialized as enabled.",
+        after_long_help = "Examples:\n  sm profiles\n  sm profiles new matt\n  sm profiles new archive --disabled"
     )]
-    Profiles,
+    Profiles {
+        #[command(subcommand)]
+        command: Option<ProfilesCommand>,
+    },
 
     /// List profile-qualified skills.
     #[command(
-        long_about = "List profile-qualified skills.\n\nEach output line has the form <profile>/<skill>. With no PROFILE arguments, skills from every profile are listed. sm identifies skills by immediate directory name and does not inspect SKILL.md.",
-        after_long_help = "Examples:\n  sm skills\n  sm skills coding research\n  sm skills common | sort"
+        long_about = "List profile-qualified skills.\n\nEach line has the form <profile>/<skill>. With no PROFILE arguments, every profile is inspected. sm identifies skills by immediate directory name and does not inspect SKILL.md.",
+        after_long_help = "Examples:\n  sm skills\n  sm skills matt research"
     )]
     Skills {
-        /// Profiles to inspect; omit to inspect every profile.
         #[arg(value_name = "PROFILE")]
         profiles: Vec<String>,
     },
 
     /// List configured targets.
     #[command(
-        long_about = "List configured targets.\n\nTarget names come from ${XDG_CONFIG_HOME:-~/.config}/sm/config.toml and are written one per line in lexical order. A malformed target configuration is reported on standard error.",
-        after_long_help = "Examples:\n  sm targets\n  sm targets | grep '^pi$'"
+        long_about = "List configured targets.\n\nTargets are projection destinations with optional shell adapters. They do not own profile activation state.",
+        after_long_help = "Examples:\n  sm targets"
     )]
     Targets,
 
-    /// List enabled profiles from lowest to highest precedence.
+    /// List globally enabled profiles.
     #[command(
-        long_about = "List enabled profiles for one persistent target.\n\nProfiles are printed from lowest to highest precedence, one per line. The order is stored as empty marker directories under the XDG state directory. Later-enabled profiles win duplicate skill names.",
-        after_long_help = "Examples:\n  sm enabled\n  sm enabled --target pi\n  sm enabled -t claude | tail -n 1"
+        long_about = "List globally enabled profiles.\n\nActivation is read from each profile's .smtag and is shared by every target.",
+        after_long_help = "Examples:\n  sm enabled"
     )]
-    Enabled {
-        /// Persistent target name; otherwise use normal target selection.
-        #[arg(short, long, value_name = "TARGET")]
-        target: Option<String>,
-    },
+    Enabled,
 
     /// List materialized managed links.
     #[command(
-        long_about = "List materialized managed links for one persistent target.\n\nEach line is tab-separated as <skill-name> <absolute-source> <absolute-destination>. Only symlinks managed by sm are shown; unmanaged files, directories, and links are omitted. An empty target produces no output.",
-        after_long_help = "Examples:\n  sm status\n  sm status --target pi\n  sm status -t pi | cut -f1"
+        long_about = "List materialized managed links.\n\nWithout --target, each tab-separated line contains target, skill, source, and destination. With --target, the target column is omitted.",
+        after_long_help = "Examples:\n  sm status\n  sm status --target agents"
     )]
     Status {
-        /// Persistent target name; otherwise use normal target selection.
         #[arg(short, long, value_name = "TARGET")]
         target: Option<String>,
     },
 
-    /// Enable profiles for a persistent target.
+    /// Globally enable profiles.
     #[command(
-        long_about = "Enable profiles for one persistent target.\n\nPROFILE arguments are processed from left to right. Each profile moves to the highest precedence, so the last argument wins duplicate skill names. sm validates the complete result and unmanaged collisions before saving marker state and reconciling managed symlinks.",
-        after_long_help = "Examples:\n  sm enable common coding\n  sm enable common coding --target pi\n  sm enable research -t claude --dry-run"
+        long_about = "Globally enable profiles by writing true to their .smtag files.\n\nEnabled profiles may not contain duplicate skill names. This command changes inventory state only; run sm apply to update targets.",
+        after_long_help = "Examples:\n  sm enable common matt\n  sm enable matt --dry-run"
     )]
     Enable {
-        /// Profiles to enable, in increasing precedence order.
         #[arg(required = true, value_name = "PROFILE")]
         profiles: Vec<String>,
-        /// Persistent target name; otherwise use normal target selection.
-        #[arg(short, long, value_name = "TARGET")]
-        target: Option<String>,
-        /// Validate and print planned operations without changing files.
         #[arg(long)]
         dry_run: bool,
     },
 
-    /// Disable profiles for a persistent target.
+    /// Globally disable profiles.
     #[command(
-        long_about = "Disable profiles for one persistent target.\n\nRemoving a winning profile reveals the next highest-precedence copy of each duplicate skill. Disabling an already-disabled profile is an idempotent success and still reconciles the target. Unmanaged target entries are never removed.",
-        after_long_help = "Examples:\n  sm disable research\n  sm disable work personal --target pi\n  sm disable coding -t claude --dry-run"
+        long_about = "Globally disable profiles by writing false to their .smtag files.\n\nThis command changes inventory state only; run sm apply to update targets.",
+        after_long_help = "Examples:\n  sm disable archive\n  sm disable matt --dry-run"
     )]
     Disable {
-        /// Profiles to disable.
         #[arg(required = true, value_name = "PROFILE")]
         profiles: Vec<String>,
-        /// Persistent target name; otherwise use normal target selection.
-        #[arg(short, long, value_name = "TARGET")]
-        target: Option<String>,
-        /// Validate and print planned operations without changing files.
         #[arg(long)]
         dry_run: bool,
     },
 
-    /// Reconcile a persistent target without changing precedence.
+    /// Reconcile configured targets with globally enabled profiles.
     #[command(
-        long_about = "Reconcile a persistent target without changing enabled profiles or precedence.\n\nUse apply after editing or updating profile directories, or to repair an interrupted target update. sm recreates missing or stale managed links, removes obsolete managed links, and preserves unmanaged entries.",
-        after_long_help = "Examples:\n  git -C ~/.sm pull --ff-only && sm apply\n  sm apply --target pi\n  sm apply -t claude --dry-run"
+        long_about = "Reconcile configured targets with globally enabled profiles.\n\nBy default every persistent target is preflighted before any is changed. Real directories block reconciliation unless --force removes them. Ordinary files, hidden entries, and unrelated symlinks are preserved unless they block a desired skill name.",
+        after_long_help = "Examples:\n  sm apply\n  sm apply --force\n  sm apply --target agents --dry-run"
     )]
     Apply {
-        /// Persistent target name; otherwise use normal target selection.
         #[arg(short, long, value_name = "TARGET")]
         target: Option<String>,
-        /// Validate and print planned operations without changing files.
+        #[arg(short, long)]
+        force: bool,
         #[arg(long)]
         dry_run: bool,
     },
 
     /// Start an isolated child shell.
     #[command(
-        long_about = "Start an isolated child shell using a target's generic command template.\n\nsm creates or reuses a stable generated skill directory and prepends a private wrapper to the child shell's PATH. Only the configured command is wrapped.\n\nWith any --profile option, persistent enabled profiles are not inherited. Without --profile, the target's persistent enabled profiles form the base set. --skill selections are added in either mode. Later selectors win duplicate directory names. The target must accept an explicit skill path through its argv or environment template.",
-        after_long_help = "Examples:\n  sm shell pi\n  sm shell pi --skill research/web-search\n  sm shell pi --profile common --profile coding\n  sm shell pi --profile common -- -l\n\nInside the child shell, invoke the configured command normally. Exit the child shell to end its scope."
+        long_about = "Start an isolated zsh, Bash, Fish, or other child shell.\n\nConfigured shell adapters are wrapped to use one stable generation. Without --target every available adapter is wrapped. Any --profile makes the profile set explicit; otherwise globally enabled profiles are inherited.",
+        after_long_help = "Examples:\n  sm shell\n  sm shell --profile matt\n  sm shell --target pi --skill research/web-search\n  sm shell -- --no-rcs"
     )]
     Shell {
-        /// Target whose shell command template will be wrapped.
-        #[arg(value_name = "TARGET")]
-        target: String,
-        /// Explicit profile selection; repeatable. Any occurrence disables inheritance.
+        /// Deprecated positional target; prefer --target.
+        #[arg(value_name = "TARGET", hide = true, conflicts_with = "targets")]
+        target: Option<String>,
+        #[arg(short, long = "target", value_name = "TARGET")]
+        targets: Vec<String>,
         #[arg(long = "profile", value_name = "PROFILE")]
         profiles: Vec<String>,
-        /// Add one profile-qualified skill; repeatable.
         #[arg(long = "skill", value_name = "PROFILE/SKILL")]
         skills: Vec<String>,
-        /// Arguments after -- are passed to the child shell.
         #[arg(last = true, value_name = "SHELL_ARGUMENT")]
         shell_args: Vec<OsString>,
     },
 
-    /// Copy profiles or individual skills into a project directory.
+    /// Copy profiles or skills into a project directory.
     #[command(
-        long_about = "Copy selected profiles or individual skills into a project-owned directory.\n\nAt least one --profile or --skill selector is required. Selectors form a left-to-right union; later selectors win duplicate skill names. The destination defaults to .skills/. Every collision is checked before copying. Existing entries are never merged or overwritten.\n\nExport is a one-time ownership transfer: sm does not track, update, or later delete the copied directories.",
-        after_long_help = "Examples:\n  sm export --profile common\n  sm export --skill research/web-search\n  sm export --profile coding --to .agents/skills\n  sm export --profile common --dry-run"
+        long_about = "Copy profiles or individual skills into a project-owned directory.\n\nAt least one selector is required. Existing entries are never overwritten and the copies are not tracked afterward.",
+        after_long_help = "Examples:\n  sm export --profile common\n  sm export --skill research/web-search --to .agents/skills"
     )]
     Export {
-        /// Copy every skill in this profile; repeatable.
         #[arg(long = "profile", value_name = "PROFILE")]
         profiles: Vec<String>,
-        /// Copy one profile-qualified skill; repeatable.
         #[arg(long = "skill", value_name = "PROFILE/SKILL")]
         skills: Vec<String>,
-        /// Project-owned destination directory.
         #[arg(long = "to", default_value = ".skills", value_name = "DIRECTORY")]
         destination: OsString,
-        /// Validate and print planned copies without changing files.
         #[arg(long)]
         dry_run: bool,
     },
 
-    /// Copy project skills into a profile.
+    /// Copy source skills into one profile.
     #[command(
-        long_about = "Copy project-owned skills into one profile.\n\nThe source defaults to .skills/. With no --skill options, every immediate skill directory is imported. With --skill, only the named source entries are copied. The destination profile is created when absent. Existing destination names fail the entire operation unless --replace is explicit. Replacement affects selected names only and never removes other profile entries.\n\nImport is a one-time ownership transfer: the destination profile owns the copies and sm does not synchronize them with the project.",
-        after_long_help = "Examples:\n  sm import --profile project-tools\n  sm import --profile project-tools --skill deploy --skill release-notes\n  sm import --profile coding --from .agents/skills --replace\n  sm import --profile coding --dry-run"
+        long_about = "Copy source skills into one profile.\n\nImport may add skills but never removes source directories. Managed sm links in the source are skipped. The profile must exist unless --create is supplied, and existing destination skills require --replace. Run sm apply separately.",
+        after_long_help = "Examples:\n  sm import --profile matt --from ~/.agents/skills --create\n  sm import --profile matt --skill code-review --replace"
     )]
     Import {
-        /// Destination profile, created when absent.
         #[arg(long, value_name = "PROFILE")]
         profile: String,
-        /// Import one unqualified skill name; repeatable. Omit to import all.
         #[arg(long = "skill", value_name = "SKILL")]
         skills: Vec<String>,
-        /// Project-owned source directory.
         #[arg(long = "from", default_value = ".skills", value_name = "DIRECTORY")]
         source: OsString,
-        /// Replace existing selected skill directories.
+        #[arg(long)]
+        create: bool,
         #[arg(long)]
         replace: bool,
-        /// Validate and print planned copies without changing files.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Replace existing inventory skills from same-named source directories.
+    #[command(
+        long_about = "Replace existing inventory skills from same-named source directories.\n\nUpdate never creates a profile or skill. Unknown source directories are skipped. Duplicate inventory names require --profile to select one owner or --all to update every existing copy. Run sm apply separately.",
+        after_long_help = "Examples:\n  sm update --from ~/.agents/skills\n  sm update --from ~/.agents/skills --profile matt\n  sm update --from ~/.agents/skills --all --dry-run"
+    )]
+    Update {
+        #[arg(long = "from", value_name = "DIRECTORY", required = true)]
+        source: OsString,
+        #[arg(long = "skill", value_name = "SKILL")]
+        skills: Vec<String>,
+        #[arg(long, value_name = "PROFILE", conflicts_with = "all")]
+        profile: Option<String>,
+        #[arg(long, conflicts_with = "profile")]
+        all: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Register a skill directory as a target.
+    #[command(
+        long_about = "Register a skill directory as a persistent target.\n\nAdopt edits config.toml while preserving existing formatting and comments. It does not move skills, infer a shell adapter, or run sm apply.",
+        after_long_help = "Examples:\n  sm adopt agents ~/.agents/skills\n  sm adopt pi ~/.pi/agent/skills --dry-run"
+    )]
+    Adopt {
+        #[arg(value_name = "TARGET")]
+        target: String,
+        #[arg(value_name = "DIRECTORY")]
+        directory: OsString,
         #[arg(long)]
         dry_run: bool,
     },
 
     /// Remove shell generations without live leases.
     #[command(
-        long_about = "Remove stable shell generations that have no live process lease.\n\nRunning child shells and wrapped commands hold PID-based directory leases and are skipped. Unknown or malformed cache entries are preserved. gc removes complete generation directories only and is silent when nothing is eligible.",
+        long_about = "Remove stable shell generations that have no live process lease.\n\nRunning child shells and wrapped commands are skipped. Unknown cache entries are preserved.",
         after_long_help = "Examples:\n  sm gc --dry-run\n  sm gc"
     )]
     Gc {
-        /// Print removable generation directories without deleting them.
         #[arg(long)]
         dry_run: bool,
     },
@@ -195,6 +205,19 @@ pub enum Command {
         generation: String,
         #[arg(last = true, required = true)]
         command: Vec<OsString>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProfilesCommand {
+    /// Create one or more profiles.
+    New {
+        #[arg(required = true, value_name = "PROFILE")]
+        profiles: Vec<String>,
+        #[arg(long)]
+        disabled: bool,
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 

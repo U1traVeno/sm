@@ -1,44 +1,60 @@
 # sm
 
-`sm` keeps an agent's visible skills small by activating directory-based profiles on demand.
+`sm` manages directory-based agent skill profiles, keeps one global activation set, and projects that set into configured agent skill directories with symlinks.
 
-A Git repository under `~/.sm` stores every available skill. `sm enable` and `sm disable` expose only the required profiles in an agent's skill directory, using symlinks. Different profiles can be enabled for different targets, and `sm shell` can create an isolated skill set for commands that accept an explicit skill path.
+The complete inventory lives under `~/.sm/profiles`. Each profile owns a `.smtag` containing `true` or `false`. Every configured target receives the same globally enabled skill set. Temporary variation belongs to `sm shell`, which gives configured agent commands a session-specific generated skill directory without changing global targets.
 
-`sm` is not a skill package manager and does not run Git. It manages skill visibility.
+`sm` is package-manager agnostic. It does not invoke Git, run installers, or parse `SKILL.md`.
 
 ## Installation
 
 The current implementation supports macOS and Linux and requires Rust 1.88 or newer:
 
 ```console
-$ cargo install sm-skill-manager
+cargo install sm-skill-manager
 ```
 
-The crate is named `sm-skill-manager`; the installed executable is `sm`. To install from a source checkout instead:
+The crate installs the `sm` executable. To install a checkout:
 
 ```console
-$ cargo install --path .
+cargo install --path .
 ```
 
-## Quick Start
-
-Create or clone an `sm` home:
+## Profile Layout
 
 ```text
 ~/.sm/
   profiles/
     common/
+      .smtag              # true
       code-review/
         SKILL.md
-    research/
-      web-search/
+    archive/
+      .smtag              # false
+      old-skill/
         SKILL.md
 ```
 
-Configure a target in `~/.config/sm/config.toml`:
+A missing `.smtag` is initialized to `true` when sm next reads the inventory. Profile and skill identity come from immediate directory names.
+
+Create and activate profiles:
+
+```console
+sm profiles new matt
+sm profiles new archive --disabled
+sm enable matt
+sm disable archive
+```
+
+Activation commands change inventory state only. Run `sm apply` separately to update targets.
+
+## Targets
+
+Configure projection directories and optional shell adapters in `~/.config/sm/config.toml`:
 
 ```toml
-default_target = "pi"
+[targets.agents]
+skills_dir = "~/.agents/skills"
 
 [targets.pi]
 skills_dir = "~/.pi/agent/skills"
@@ -48,64 +64,77 @@ command = "pi"
 args = ["--no-skills", "--skill", "{skills}"]
 ```
 
-Enable profiles for the default target:
+Target paths must be distinct and must not overlap the profile inventory. All persistent targets receive the same global set:
 
 ```console
-$ sm enable common research
-$ sm enabled
-common
-research
+sm apply
+sm apply --target agents
+sm apply --force
 ```
 
-Later-enabled profiles win when two profiles contain the same skill directory name. Disabling the winner reveals the next enabled copy:
+A real directory in a target blocks normal apply. `--force` removes non-hidden real directories before creating the desired links, which is useful after an external installer writes directly into a target.
+
+Register another projection directory without hand-editing TOML:
 
 ```console
-$ sm disable research
+sm adopt codex ~/.codex/skills
 ```
 
-Start an isolated child shell with an explicit profile set:
+## External Installers
+
+Import selected new skills into a profile:
 
 ```console
-$ sm shell pi --profile common --profile research
+npx skills@latest add mattpocock/skills
+sm import --profile matt --from ~/.agents/skills --create \
+  --skill code-review --skill tdd
+sm apply --force
+```
+
+Update only skills already present anywhere in the inventory:
+
+```console
+npx skills@latest add mattpocock/skills
+sm update --from ~/.agents/skills
+sm apply --force
+```
+
+`update` never creates profiles or skills. Unknown source directories remain untouched. Duplicate inventory names require `--profile PROFILE` or `--all`.
+
+## Isolated Shells
+
+```console
+sm shell --profile matt
 (sm) $ pi
 ```
 
-Copy skills into a project when they should be committed with that project:
+With no `--target`, every configured shell adapter is wrapped in the child zsh, Bash, or Fish session. With no `--profile`, the generation inherits globally enabled profiles. Any explicit `--profile` replaces that inherited set.
+
+## Project Copies
 
 ```console
-$ sm export --profile common --skill research/web-search
+sm export --profile common --to .agents/skills
+sm import --profile project-tools --from .skills --create
 ```
 
-This copies to `.skills/` by default. The project owns the copies; `sm` does not update or delete them later.
-
-Import directories produced by an external installer, replacing selected existing skills explicitly:
-
-```console
-$ sm import --profile coding --from .agents/skills --replace
-```
-
-`sm` remains package-manager agnostic. See [Project Import and Export](docs/project-skills.md) for a composable `npx skills` workflow.
+Import and export copy directories. Their source copies remain independently owned.
 
 ## Documentation
 
-- [English documentation](docs/README.md)
-- [简体中文文档](docs/zh-cn/README.md)
-
-English topics:
-
 - [Getting Started](docs/getting-started.md)
-- [Profiles and Activation](docs/profiles.md)
-- [Targets and Templates](docs/targets.md)
+- [Profiles and Global Activation](docs/profiles.md)
+- [Targets and Shell Adapters](docs/targets.md)
 - [Isolated Shells](docs/shell.md)
-- [Project Import and Export](docs/project-skills.md)
+- [Import, Update, and Export](docs/project-skills.md)
 - [Command Reference](docs/command-reference.md)
 - [Filesystem Layout](docs/filesystem-layout.md)
+- [简体中文文档](docs/zh-cn/README.md)
 
 ## Principles
 
-- Profiles and skills are represented by directories.
-- Git remains responsible for repository synchronization.
-- Agent-specific behavior is data in target templates, not branches in the core.
-- Successful mutating commands are silent.
-- Diagnostics go to standard error.
-- Existing files are never silently merged or overwritten; replacement must be explicit.
+- Profile directories are the source of inventory truth.
+- Global activation belongs to each profile, not to a target.
+- Inventory commands and persistent projection are separate phases.
+- `apply` is the only command that changes persistent target contents.
+- Temporary differences use isolated shell generations.
+- Git and package installers remain separate tools.

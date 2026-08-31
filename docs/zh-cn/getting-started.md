@@ -2,141 +2,139 @@
 
 语言：[English](../getting-started.md) | **简体中文**
 
-## 环境要求
-
-当前实现支持 macOS 和 Linux。从源码构建需要 Rust 1.88 或更高版本。
-
-持久激活和 shell generation 需要文件系统支持创建符号链接。项目导入和导出使用复制，不使用符号链接。
-
-运行 `sm` 时不要求 Git 存在。如果 `~/.sm` 是 Git checkout，请使用普通 Git 命令同步。
-
-## 安装
-
-从 crates.io 安装：
+## 1. 安装
 
 ```console
-$ cargo install sm-skill-manager
+cargo install sm-skill-manager
 ```
 
-crate 名称是 `sm-skill-manager`，安装后的可执行文件仍是 `sm`。若要从项目 checkout 安装：
+该 crate 安装 `sm`，要求 Rust 1.88 或更新版本。
+
+## 2. 创建 Profile
 
 ```console
-$ cargo install --path .
+sm profiles new common
 ```
 
-## 创建 Skill 仓库
-
-`SM_HOME` 默认为 `~/.sm`。profile 是 `profiles/` 的直接子目录，skill 是 profile 下的直接子目录：
+这会创建：
 
 ```text
-~/.sm/
-  profiles/
-    common/
-      shell-tools/
-        SKILL.md
-    coding/
-      code-review/
-        SKILL.md
-      repository-search/
-        SKILL.md
+~/.sm/profiles/common/.smtag
 ```
 
-`sm` 使用目录名识别 profile 和 skill，不解析或校验 `SKILL.md`。
+内容为 `true`。手工创建的 profile 目录也有效；sm 下次读取 inventory 时会把缺少的 `.smtag` 初始化为 `true`。
 
-若要在多台机器间同步全部 skills，可让 `~/.sm` 成为普通 Git checkout：
+直接增加 skill 目录，或者导入：
 
 ```console
-$ git clone git@example.com:you/skills.git ~/.sm
-$ git -C ~/.sm pull --ff-only
+sm import --profile common --from .skills
 ```
 
-`sm` 自身永远不会执行这些命令。
+## 3. 配置 Target
 
-## 配置 Target
+登记一个持久投影目录：
 
-创建 `~/.config/sm/config.toml`：
+```console
+sm adopt agents ~/.agents/skills
+```
+
+也可以编辑 `~/.config/sm/config.toml`：
 
 ```toml
-default_target = "pi"
+[targets.agents]
+skills_dir = "~/.agents/skills"
+```
 
-[targets.pi]
-skills_dir = "~/.pi/agent/skills"
+Target 不拥有 activation。每个 target 得到同一个全局集合。
 
+## 4. Apply
+
+```console
+sm apply
+```
+
+该命令为所有 `.smtag` 为 `true` 的 profile skills 创建软链接。
+
+若 installer 已在 target 写入真实目录，先检查：
+
+```console
+sm apply --force --dry-run
+```
+
+然后收敛：
+
+```console
+sm apply --force
+```
+
+Force 会删除选中 targets 内全部非隐藏真实目录。普通文件、隐藏条目和无关外部软链接会保留。
+
+## 5. 启用与停用
+
+```console
+sm disable common
+sm apply
+
+sm enable common
+sm apply
+```
+
+Enable 和 disable 只更新 `.smtag`；apply 始终显式执行。
+
+## 6. 增加 Installer Skill
+
+外部 installer 写入 target 后，只导入需要的新 skills：
+
+```console
+sm profiles new matt
+sm import --profile matt \
+  --from ~/.agents/skills \
+  --skill code-review \
+  --skill tdd
+sm apply --force
+```
+
+Import 保留来源目录。Force apply 删除 installer 目录并恢复 desired symlinks。
+
+## 7. 更新已管理 Skill
+
+先广泛下载，再只更新 sm 中已经存在的名称：
+
+```console
+npx skills@latest add mattpocock/skills
+sm update --from ~/.agents/skills --profile matt
+sm apply --force
+```
+
+Update 永远不会加入未知下载。
+
+## 8. 配置隔离 Shell
+
+增加 adapter：
+
+```toml
 [targets.pi.shell]
 command = "pi"
 args = ["--no-skills", "--skill", "{skills}"]
 ```
 
-持久 target 和 shell 模板是两个独立能力：
-
-- `skills_dir` 允许使用 `enable` 和 `disable`。
-- `shell` 允许使用隔离的 `sm shell` 会话。
-- 一个 target 可以只定义其中一种能力，也可以同时定义两种。
-
-完整格式见 [Targets 与模板](targets.md)。
-
-## 激活 Profiles
+启动临时 profile scope：
 
 ```console
-$ sm enable common coding
-$ sm enabled
-common
-coding
+sm shell --profile matt
+(sm) $ pi
 ```
 
-`sm enabled` 按优先级从低到高输出。重新启用已启用的 profile，会把它移动到末尾：
+未显式选择 profile 时，shell generation 继承全局集合。未限制 target 时，所有 adapters 都会被包装。
+
+## 9. 检查状态
 
 ```console
-$ sm enable common
-$ sm enabled
-coding
-common
+sm profiles
+sm skills
+sm enabled
+sm targets
+sm status
 ```
 
-如果两个 profile 都有 `code-review`，此时 `common` 下的版本可见。
-
-禁用一个 profile 不会影响其他 profile：
-
-```console
-$ sm disable common
-```
-
-未配置默认 target 或需要操作其他 target 时，使用 `--target`：
-
-```console
-$ sm enable research --target claude
-```
-
-## 查看状态
-
-以下命令提供逐行输出：
-
-```console
-$ sm profiles
-coding
-common
-research
-
-$ sm skills coding
-coding/code-review
-coding/repository-search
-
-$ sm targets
-claude
-pi
-```
-
-查看某个 target 中实际生效的 skills：
-
-```console
-$ sm status --target pi
-code-review	/Users/me/.sm/profiles/coding/code-review	/Users/me/.pi/agent/skills/code-review
-```
-
-实际输出使用绝对路径，字段之间以制表符分隔。
-
-## 后续阅读
-
-- [Profiles 与激活](profiles.md)：优先级与冲突行为。
-- [隔离 Shell](shell.md)：让并发 Agent 使用不同 skill 集合。
-- [项目 Skill 的导入与导出](project-skills.md)：把 skills 放进项目仓库。
+在 mutating commands 上使用 `--dry-run`，可验证计划而不修改文件。

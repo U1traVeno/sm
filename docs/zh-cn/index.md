@@ -2,19 +2,19 @@
 
 语言：[English](../) | **简体中文**
 
-`sm` 通过按需激活目录式 profiles，控制 Agent 能看到的 skills 数量。
+`sm` 保存目录式 skill profiles，通过 profile 内的 `.smtag` 维护一套全局启用集合，并使用软链接把该集合投影到 configured agent directories。
 
-`~/.sm` 下的 Git 仓库存放全部 skills。`sm enable` 和 `sm disable` 使用符号链接，只把所需 profiles 暴露到 Agent 的 skill 目录。不同 targets 可以启用不同 profiles；对于支持显式 skill 路径的命令，`sm shell` 还能创建隔离的 skill 集合。
+Inventory 操作与持久投影明确分离：使用 import 或 update 修改 profiles，再通过 apply 协调 targets。`sm shell` 为所有 configured shell adapters 提供会话专属 skill 集合，不修改全局 targets。
 
-`sm` 不是 skill 包管理器，也不会运行 Git。它只管理 skill 的可见性。
+sm 与 package manager 解耦，也永远不会调用 Git。
 
 ## 从这里开始
 
 - [快速开始](getting-started.md)
-- [Profiles 与激活](profiles.md)
-- [Targets 与模板](targets.md)
+- [Profiles 与全局启用](profiles.md)
+- [Targets 与 Shell Adapters](targets.md)
 - [隔离 Shell](shell.md)
-- [项目 Skill 的导入与导出](project-skills.md)
+- [Import、Update 与 Export](project-skills.md)
 
 ## 参考
 

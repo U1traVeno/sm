@@ -1,154 +1,123 @@
-# Project Import and Export
+# Import, Update, and Export
 
 Language: **English** | [简体中文](zh-cn/project-skills.md)
 
-Project transfer copies skill directories. It is separate from persistent activation and isolated shell generations, which use symlinks.
-
-A copy is a one-time ownership transfer:
-
-- after export, the project owns the copy;
-- after import, the destination profile owns the copy;
-- `sm` does not track, update, synchronize, or later delete either copy.
-
-## Export Profiles
-
-Export one or more complete profiles:
-
-```console
-$ sm export --profile common --profile coding
-```
-
-The default destination is `.skills/` under the current working directory.
-
-Export to an agent-recognized project directory explicitly:
-
-```console
-$ sm export --profile coding --to .agents/skills
-```
-
-`.skills/` is neutral vendored storage. `sm` does not assume that an agent discovers it automatically.
-
-## Export Individual Skills
-
-Use a profile-qualified reference:
-
-```console
-$ sm export --skill research/web-search
-```
-
-Combine complete profiles and individual skills:
-
-```console
-$ sm export \
-  --profile common \
-  --skill research/web-search \
-  --to .skills
-```
-
-Selectors form a union and are resolved from left to right. A later selector wins when selected profiles contain the same skill directory name.
-
-At least one `--profile` or `--skill` is required. Export never inherits a target's enabled profiles.
-
-## Import into a Profile
-
-Import every immediate skill directory from `.skills/` into a profile:
-
-```console
-$ sm import --profile project-tools
-```
-
-Import selected skills only:
-
-```console
-$ sm import \
-  --profile project-tools \
-  --skill deploy \
-  --skill release-notes
-```
-
-Use a different source directory with `--from`:
-
-```console
-$ sm import --profile project-tools --from .agents/skills
-```
-
-Replace selected existing skill directories explicitly:
-
-```console
-$ sm import --profile project-tools --from .agents/skills --replace
-```
-
-The destination profile is created when it does not exist. Imported skills become ordinary directories under:
+sm deliberately separates inventory changes from target projection:
 
 ```text
-$SM_HOME/profiles/<profile>/<skill>/
+import/update/enable/disable -> profile inventory
+apply                        -> persistent targets
 ```
 
-## Composing with Package Installers
+This makes external installers composable without giving them ownership of `$SM_HOME`.
 
-`sm` does not invoke package installers. An installer can write into a temporary project directory, followed by `sm import --replace`. This zsh function composes `npx skills` with the default persistent target:
+## Import New Skills
 
-```zsh
-sm-add() {
-  if (( $# < 2 )); then
-    print -u2 'usage: sm-add PROFILE SOURCE [SKILLS-ADD-OPTION...]'
-    return 2
-  fi
-
-  local profile=$1 arg tmp
-  shift
-  for arg in "$@"; do
-    case $arg in
-      -g|--global|--global=*|-a|--agent|--agent=*|--all|--copy)
-        print -u2 "sm-add: unsupported skills add option: $arg"
-        return 2
-        ;;
-    esac
-  done
-
-  tmp=$(mktemp -d "${TMPDIR:-/tmp}/sm-add.XXXXXXXX") || return 1
-  {
-    (
-      cd "$tmp" &&
-        command npx --yes skills add "$@" --agent universal --yes
-    ) || return
-    command sm import \
-      --profile "$profile" \
-      --from "$tmp/.agents/skills" \
-      --replace || return
-    if ! command sm apply; then
-      print -u2 "sm-add: imported into profile $profile, but sm apply failed"
-      return 1
-    fi
-  } always {
-    command rm -rf -- "$tmp"
-  }
-}
-```
-
-The first argument belongs to `sm`; the remaining arguments are passed to `skills add`. Scope, agent, all-agent, and copy options are rejected because they can bypass the temporary canonical directory. Set `SM_TARGET` when applying to a non-default target:
+Import copies source directories into one profile:
 
 ```console
-$ SM_TARGET=pi sm-add development vercel-labs/agent-skills --skill web-design-guidelines
+sm import --profile project-tools --from .skills --create
 ```
 
-The function imports inventory but does not enable the profile or change precedence. Run `sm enable <profile>` explicitly the first time. The temporary `skills-lock.json` is discarded, so updates repeat the original `sm-add` command rather than using `npx skills update`. If import succeeds but apply fails, the imported profile remains; resolve the target problem and run `sm apply` again.
+Rules:
 
-## Collision Rules
+- the destination profile must exist unless `--create` is explicit;
+- a created profile receives `.smtag` with `true`;
+- import may add skills but never deletes source directories;
+- existing destination names fail unless `--replace` is explicit;
+- replacement affects selected names only;
+- sm-managed links in the source are skipped;
+- other source symlinks are rejected;
+- the complete batch is staged before replacement;
+- import never runs apply.
 
-Before copying anything, `sm` validates every source and destination name. Without `--replace`, any existing destination entry fails the entire operation without copying.
-
-With `--replace`, each selected existing destination must be a real directory. New content is fully staged before destination changes begin. Ordinary failures during installation roll back the selected names. Replacement does not merge directories, delete profile entries absent from the source, compare versions, or synchronize earlier copies.
-
-Use ordinary tools such as `diff -r` and `rm -r` when you need comparison, merging, or deletion semantics.
-
-## Copy Semantics
-
-`sm` recursively copies each selected skill directory and preserves executable permission bits and symlinks contained inside the skill. The top-level imported or exported skill becomes a real directory at the destination.
-
-A successful import or export is silent. Use `--dry-run` to inspect the planned copies:
+Select a subset:
 
 ```console
-$ sm export --profile common --dry-run
-copy	/Users/me/.sm/profiles/common/code-review	/working/project/.skills/code-review
+sm import --profile matt \
+  --from ~/.agents/skills \
+  --create \
+  --skill code-review \
+  --skill tdd
 ```
+
+If adding a skill would create a duplicate name across globally enabled profiles, import fails before changing inventory. Disable one owner first or import into a disabled profile.
+
+## Update Existing Skills
+
+`update` searches all profiles by immediate skill directory name and replaces only existing matches:
+
+```console
+sm update --from ~/.agents/skills
+```
+
+Unknown source directories remain in place and are not added to sm.
+
+When one name exists in several profiles, activation does not choose an owner. Resolve the ambiguity explicitly:
+
+```console
+sm update --from ~/.agents/skills --profile matt
+sm update --from ~/.agents/skills --all
+```
+
+`--profile` limits updates to existing matches in one existing profile. `--all` updates every existing copy. Neither option allows update to create a profile or skill.
+
+Select source names when needed:
+
+```console
+sm update --from ~/.agents/skills --skill code-review --profile matt
+```
+
+An explicitly selected source name must exist. The update batch is fully staged before any inventory destination changes.
+
+## npx Workflow
+
+Install broadly into a configured target:
+
+```console
+npx skills@latest add mattpocock/skills
+```
+
+For new skills, choose what to manage:
+
+```console
+sm profiles new matt
+sm import --profile matt \
+  --from ~/.agents/skills \
+  --skill code-review \
+  --skill tdd
+sm apply --force
+```
+
+Real source directories remain until force apply removes them and recreates links for globally active skills. Unwanted installer directories are also removed from selected targets by `--force`.
+
+For later bulk updates:
+
+```console
+npx skills@latest add mattpocock/skills
+sm update --from ~/.agents/skills --profile matt
+sm apply --force
+```
+
+This updates known inventory entries, ignores newly offered skills, and then restores target links.
+
+## Export Project Copies
+
+Export copies selected inventory skills to a project-owned directory:
+
+```console
+sm export --profile common
+sm export --skill research/web-search --to .agents/skills
+```
+
+At least one selector is required. Later selectors win duplicate output names. Existing destination entries are never overwritten. The project owns exported copies and sm does not update or remove them later.
+
+## Dry Run
+
+```console
+sm import --profile matt --from ~/.agents/skills --create --dry-run
+sm update --from ~/.agents/skills --dry-run
+sm apply --force --dry-run
+```
+
+Dry runs validate and print tab-separated operations without creating tags, inventory entries, links, or directories.

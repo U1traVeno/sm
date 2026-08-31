@@ -1,17 +1,10 @@
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 
-use crate::util::{process_is_alive, sorted_entries, validate_component};
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EnabledProfile {
-    pub sequence: u64,
-    pub name: String,
-}
+use crate::util::{process_is_alive, sorted_entries};
 
 struct StateLock {
     path: PathBuf,
@@ -21,7 +14,7 @@ pub struct TargetLock {
     _lock: StateLock,
 }
 
-pub struct ProfileLock {
+pub struct InventoryLock {
     _lock: StateLock,
 }
 
@@ -33,10 +26,10 @@ impl TargetLock {
     }
 }
 
-impl ProfileLock {
-    pub fn acquire(profile_state: &Path) -> Result<Self> {
+impl InventoryLock {
+    pub fn acquire(inventory_state: &Path) -> Result<Self> {
         Ok(Self {
-            _lock: StateLock::acquire(profile_state, "profile")?,
+            _lock: StateLock::acquire(inventory_state, "inventory")?,
         })
     }
 }
@@ -80,6 +73,41 @@ impl Drop for StateLock {
     }
 }
 
+pub fn remove_legacy_activation_state(state_root: &Path, dry_run: bool) -> Result<()> {
+    let targets = state_root.join("targets");
+    if !targets.exists() {
+        return Ok(());
+    }
+    let mut obsolete = Vec::new();
+    for target in sorted_entries(&targets)? {
+        let enabled = target.path().join("enabled");
+        if fs::symlink_metadata(&enabled).is_ok() {
+            obsolete.push(enabled);
+        }
+    }
+    if obsolete.is_empty() {
+        return Ok(());
+    }
+    if dry_run {
+        for path in obsolete {
+            println!("remove\t{}", path.display());
+        }
+        return Ok(());
+    }
+    for path in obsolete {
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("failed to remove obsolete state {}", path.display()))?;
+        } else {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove obsolete state {}", path.display()))?;
+        }
+    }
+    eprintln!("sm: removed obsolete per-target activation state");
+    Ok(())
+}
+
 fn lock_has_live_or_unknown_owner(path: &Path) -> Result<bool> {
     let entries = sorted_entries(path)?;
     if entries.is_empty() {
@@ -98,108 +126,6 @@ fn lock_has_live_or_unknown_owner(path: &Path) -> Result<bool> {
         }
     }
     Ok(false)
-}
-
-pub fn load_enabled(target_state: &Path) -> Result<Vec<EnabledProfile>> {
-    let path = target_state.join("enabled");
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let mut enabled = Vec::new();
-    for entry in sorted_entries(&path)? {
-        let metadata = fs::symlink_metadata(entry.path())?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            bail!(
-                "enabled marker is not a directory: {}",
-                entry.path().display()
-            );
-        }
-        let marker = entry.file_name().to_string_lossy().into_owned();
-        let Some((sequence, name)) = marker.split_once('-') else {
-            bail!("invalid enabled marker: {marker}");
-        };
-        let sequence = sequence
-            .parse::<u64>()
-            .with_context(|| format!("invalid enabled marker sequence: {marker}"))?;
-        validate_component(name, "profile")?;
-        enabled.push(EnabledProfile {
-            sequence,
-            name: name.to_owned(),
-        });
-    }
-    enabled.sort_by_key(|entry| entry.sequence);
-    let mut names = BTreeSet::new();
-    for pair in enabled.windows(2) {
-        if pair[0].sequence == pair[1].sequence {
-            bail!("duplicate enabled marker sequence: {}", pair[0].sequence);
-        }
-    }
-    for entry in &enabled {
-        if !names.insert(&entry.name) {
-            bail!("duplicate enabled profile marker: {}", entry.name);
-        }
-    }
-    Ok(enabled)
-}
-
-pub fn enable_profiles(enabled: &mut Vec<EnabledProfile>, profiles: &[String]) -> Result<()> {
-    let mut next = enabled
-        .iter()
-        .map(|entry| entry.sequence)
-        .max()
-        .unwrap_or(0);
-    for profile in profiles {
-        validate_component(profile, "profile")?;
-        enabled.retain(|entry| entry.name != *profile);
-        next = next
-            .checked_add(1)
-            .context("enabled profile sequence overflow")?;
-        enabled.push(EnabledProfile {
-            sequence: next,
-            name: profile.clone(),
-        });
-    }
-    Ok(())
-}
-
-pub fn disable_profiles(enabled: &mut Vec<EnabledProfile>, profiles: &[String]) -> Result<()> {
-    for profile in profiles {
-        validate_component(profile, "profile")?;
-        enabled.retain(|entry| entry.name != *profile);
-    }
-    Ok(())
-}
-
-pub fn save_enabled(target_state: &Path, enabled: &[EnabledProfile]) -> Result<()> {
-    fs::create_dir_all(target_state)?;
-    let nonce = nonce();
-    let staging = target_state.join(format!("enabled.tmp.{}.{}", std::process::id(), nonce));
-    let backup = target_state.join(format!("enabled.old.{}.{}", std::process::id(), nonce));
-    fs::create_dir(&staging)?;
-    let result = (|| -> Result<()> {
-        for entry in enabled {
-            fs::create_dir(staging.join(format!("{:020}-{}", entry.sequence, entry.name)))?;
-        }
-        let current = target_state.join("enabled");
-        let had_current = current.exists();
-        if had_current {
-            fs::rename(&current, &backup)?;
-        }
-        if let Err(error) = fs::rename(&staging, &current) {
-            if had_current {
-                let _ = fs::rename(&backup, &current);
-            }
-            return Err(error.into());
-        }
-        if had_current {
-            fs::remove_dir_all(&backup)?;
-        }
-        Ok(())
-    })();
-    if staging.exists() {
-        let _ = fs::remove_dir_all(&staging);
-    }
-    result.with_context(|| format!("failed to save enabled state in {}", target_state.display()))
 }
 
 fn nonce() -> u128 {

@@ -1,119 +1,80 @@
-# Profiles 与激活
+# Profiles 与全局启用
 
 语言：[English](../profiles.md) | **简体中文**
 
-## Profile 布局
+## 布局
 
-profile 是 `$SM_HOME/profiles` 下的目录：
-
-```text
-$SM_HOME/profiles/<profile>/<skill>/
-```
-
-只有直接的、非隐藏子目录会被视为 skills。profile 不能使用普通文件或符号链接表达 membership。每个 skill 目录下面的内容对 `sm` 是不透明的。
-
-例如：
+Profile 是 `$SM_HOME/profiles` 下的直接子目录：
 
 ```text
-~/.sm/profiles/
-  common/
-    web-search/
-    code-review/
-  backend/
-    database-migrations/
-    code-review/
+$SM_HOME/profiles/<profile>/
+  .smtag
+  <skill>/
+    SKILL.md
 ```
 
-如果一个 skill 在概念上属于多个分组，应将它放进单独的 profile，例如 `common`。`sm` 不维护中央 skill 目录，也不管理 profile membership 链接。
+Skill 是 profile 下非隐藏的直接子目录。sm 不解析 `SKILL.md`，并把 skill 内部内容视为不透明数据。Profile 和 skill 条目必须是真实目录，不能是软链接。
 
-## 启用 Profiles
+删除 profile 目录就同时删除了 profile 及其启用状态；手工新建目录就立即增加了 profile。
 
-每个 target 独立维护已启用 profiles：
+## `.smtag`
+
+`.smtag` 只接受一个布尔值，可带结尾换行：
+
+```text
+true
+```
+
+或：
+
+```text
+false
+```
+
+`true` 表示 profile 属于全局启用集合。每个持久 target 都会得到同一个集合。
+
+sm 发现 profile 缺少 `.smtag` 时，会创建内容为 `true` 的文件，并向标准错误输出一次初始化日志。Dry run 只报告该操作，不写文件。其他内容均视为错误。
+
+显式创建 profile：
 
 ```console
-$ sm enable common backend --target pi
+sm profiles new matt
+sm profiles new archive --disabled
 ```
 
-参数按从左到右的顺序处理。后启用的 profile 优先级更高。重新启用已启用的 profile 会把它提升到最高优先级，不会产生重复项。
-
-`sm enable` 执行以下步骤：
-
-1. 校验所有指定的 profile 及其直接 skill 子目录。
-2. 计算全部已启用 profiles 的并集。
-3. 检查 target 中是否存在非受管冲突。
-4. 使用文件系统标记目录记录新的优先级。
-5. 将最终胜出的 skills 物化为符号链接。
-
-可预期的校验错误会在 target 发生变化前失败。
-
-## 禁用 Profiles
+修改全局启用状态：
 
 ```console
-$ sm disable backend --target pi
+sm enable matt
+sm disable archive
 ```
 
-禁用会从该 target 的启用集合中移除 profile，并重新物化剩余并集。该命令是幂等的：禁用一个已经禁用的 profile 仍会协调 target，并静默成功。
+这些命令只修改 `.smtag`，不会修改 target。整理好 inventory 后再运行 `sm apply`。
 
-## Skill 重名
+## 同名 Skill
 
-直接子目录名就是 skill identity。`sm` 不比较 `SKILL.md` frontmatter，也不比较文件内容。
-
-给定以下启用顺序：
+不同 profiles 可以库存同名 skill，但两个全局启用的 profiles 不能同时暴露同名项：
 
 ```text
-common
-backend
+profiles/old/code-review/
+profiles/matt/code-review/
 ```
 
-以及以下目录：
+只要最多有一个 owner 启用，这个 inventory 就有效。`sm enable`、向已启用 profile 执行 import，以及 `sm apply` 都会在修改前拒绝启用冲突。
 
-```text
-profiles/common/code-review/
-profiles/backend/code-review/
-```
+隔离 shell 可以临时显式选择含同名 skill 的 profiles。此时 selector 从左到右解析，后者胜出，但不会持久化优先级。
 
-因为 `backend` 后启用，所以 `backend/code-review` 胜出。禁用 `backend` 后，`common/code-review` 会重新变为可见。
+## 手工编辑
 
-## 受管与非受管条目
+文件系统是事实来源。用户可以直接：
 
-只有当符号链接保存的目标指向 `$SM_HOME/profiles/<profile>/<skill>` 下的 skill 时，`sm` 才会管理它。
+- 创建或删除 profile 目录；
+- 在 profiles 之间移动 skill；
+- 编辑 `.smtag`；
+- 原地编辑 skill 内容。
 
-`sm` 不会删除或替换：
+成员或启用状态改变后运行 `sm apply`。外部 installer 产生了已有 skill 的新版本时，运行 `sm update --from DIRECTORY`。
 
-- 普通文件；
-- 普通目录；
-- 指向 `$SM_HOME/profiles` 以外的符号链接；
-- 无关的断裂符号链接。
+## 旧启用状态
 
-如果非受管条目与选中 skill 同名，操作会在修改 target 前失败。请显式解决冲突后重试。
-
-## 本机状态
-
-启用状态使用目录而不是 manifest：
-
-```text
-~/.local/state/sm/targets/pi/enabled/
-  00000000000000000001-common/
-  00000000000000000002-backend/
-```
-
-数字前缀记录优先级，标记目录内部为空。重新启用 profile 时，旧标记会被一个序号更高的新标记替换。
-
-这些状态仅属于当前机器，不应提交到 skill 仓库。
-
-## 同步仓库
-
-Git 操作单独执行：
-
-```console
-$ git -C ~/.sm pull --ff-only
-$ sm enable common --target pi
-```
-
-重新启用会协调 target，并将 `common` 提升到最高优先级。如果只想协调而不改变优先级，请运行：
-
-```console
-$ sm apply --target pi
-```
-
-`sm apply` 保留现有标记顺序，并修复受管链接。
+旧版本在 XDG state 下保存 per-target enabled marker。首次非 dry-run inventory 命令会删除这些过时目录；全局启用模型永远不会读取它们。

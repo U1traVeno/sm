@@ -2,19 +2,19 @@
 
 Language: **English** | [简体中文](zh-cn/)
 
-`sm` keeps an agent's visible skills small by activating directory-based profiles on demand.
+`sm` stores directory-based skill profiles, keeps one global activation set in profile-local `.smtag` files, and projects that set to configured agent directories with symlinks.
 
-A Git repository under `~/.sm` stores every available skill. `sm enable` and `sm disable` expose only the required profiles in an agent's skill directory, using symlinks. Different profiles can be enabled for different targets, and `sm shell` can create an isolated skill set for commands that accept an explicit skill path.
+Inventory operations are separate from persistent projection: use import or update to change profiles, then use apply to reconcile targets. `sm shell` provides temporary per-session skill sets to every configured shell adapter without changing global targets.
 
-`sm` is not a skill package manager and does not run Git. It manages skill visibility.
+sm is package-manager agnostic and never invokes Git.
 
 ## Start Here
 
 - [Getting Started](getting-started.md)
-- [Profiles and Activation](profiles.md)
-- [Targets and Templates](targets.md)
+- [Profiles and Global Activation](profiles.md)
+- [Targets and Shell Adapters](targets.md)
 - [Isolated Shells](shell.md)
-- [Project Import and Export](project-skills.md)
+- [Import, Update, and Export](project-skills.md)
 
 ## Reference
 

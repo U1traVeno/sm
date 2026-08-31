@@ -14,30 +14,40 @@ use crate::util::{is_executable, process_is_alive, set_executable, shell_quote, 
 
 pub fn run_shell(
     paths: &AppPaths,
-    target_name: &str,
-    template: &ShellTemplate,
+    templates: &BTreeMap<String, ShellTemplate>,
     selected: &BTreeMap<String, PathBuf>,
     shell_args: &[OsString],
 ) -> Result<ExitStatus> {
-    let executable = resolve_executable(&template.command)?;
-    let current_exe = env::current_exe().context("failed to locate sm executable")?;
-    let generation_id = generation_id(target_name, template, selected, &current_exe);
-    let creation_lease = create_lease(paths, &generation_id, std::process::id())?;
-    let generation = match ensure_generation(
-        paths,
-        &generation_id,
-        template,
-        selected,
-        &executable,
-        &current_exe,
-    ) {
-        Ok(generation) => generation,
-        Err(error) => {
-            let _ = fs::remove_dir(&creation_lease);
-            cleanup_empty_lease_parent(&creation_lease);
-            return Err(error);
+    let mut adapters = BTreeMap::new();
+    let mut command_owners = BTreeMap::<OsString, String>::new();
+    for (name, template) in templates {
+        let executable = resolve_executable(&template.command)?;
+        let command_name = template
+            .command
+            .file_name()
+            .context("shell command has no file name")?
+            .to_owned();
+        if let Some(previous) = command_owners.insert(command_name.clone(), name.clone()) {
+            bail!(
+                "shell adapters {previous} and {name} use the same command {}; select targets explicitly",
+                command_name.to_string_lossy()
+            );
         }
-    };
+        adapters.insert(name.clone(), (template.clone(), executable));
+    }
+
+    let current_exe = env::current_exe().context("failed to locate sm executable")?;
+    let generation_id = generation_id(&adapters, selected, &current_exe);
+    let creation_lease = create_lease(paths, &generation_id, std::process::id())?;
+    let generation =
+        match ensure_generation(paths, &generation_id, &adapters, selected, &current_exe) {
+            Ok(generation) => generation,
+            Err(error) => {
+                let _ = fs::remove_dir(&creation_lease);
+                cleanup_empty_lease_parent(&creation_lease);
+                return Err(error);
+            }
+        };
 
     let shell = env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh"));
     let original_path = env::var_os("PATH").unwrap_or_default();
@@ -258,9 +268,8 @@ pub fn gc(paths: &AppPaths, dry_run: bool) -> Result<()> {
 fn ensure_generation(
     paths: &AppPaths,
     id: &str,
-    template: &ShellTemplate,
+    adapters: &BTreeMap<String, (ShellTemplate, PathBuf)>,
     selected: &BTreeMap<String, PathBuf>,
-    executable: &Path,
     current_exe: &Path,
 ) -> Result<PathBuf> {
     let root = paths.generations();
@@ -288,19 +297,21 @@ fn ensure_generation(
         for (name, source) in selected {
             symlink_dir(source, &skills.join(name))?;
         }
-        let command_name = template
-            .command
-            .file_name()
-            .context("shell command has no file name")?;
-        let wrapper = bin.join(command_name);
-        write_wrapper(
-            &wrapper,
-            id,
-            template,
-            &destination.join("skills"),
-            executable,
-            current_exe,
-        )?;
+        for (template, executable) in adapters.values() {
+            let command_name = template
+                .command
+                .file_name()
+                .context("shell command has no file name")?;
+            let wrapper = bin.join(command_name);
+            write_wrapper(
+                &wrapper,
+                id,
+                template,
+                &destination.join("skills"),
+                executable,
+                current_exe,
+            )?;
+        }
         match fs::rename(&staging, &destination) {
             Ok(()) => Ok(()),
             Err(_) if generation_is_complete(&destination) => {
@@ -447,25 +458,30 @@ fn write_wrapper(
 }
 
 fn generation_id(
-    target_name: &str,
-    template: &ShellTemplate,
+    adapters: &BTreeMap<String, (ShellTemplate, PathBuf)>,
     selected: &BTreeMap<String, PathBuf>,
     current_exe: &Path,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"generation-v4-shell-startup\0");
-    hasher.update(target_name.as_bytes());
+    hasher.update(b"generation-v5-multi-adapter\0");
     hasher.update(current_exe.as_os_str().as_encoded_bytes());
-    hasher.update(template.command.as_os_str().as_encoded_bytes());
-    for argument in &template.args {
-        hasher.update(argument.as_bytes());
+    for (name, (template, executable)) in adapters {
+        hasher.update(name.as_bytes());
         hasher.update(&[0]);
-    }
-    for (key, value) in &template.env {
-        hasher.update(key.as_bytes());
+        hasher.update(template.command.as_os_str().as_encoded_bytes());
         hasher.update(&[0]);
-        hasher.update(value.as_bytes());
+        hasher.update(executable.as_os_str().as_encoded_bytes());
         hasher.update(&[0]);
+        for argument in &template.args {
+            hasher.update(argument.as_bytes());
+            hasher.update(&[0]);
+        }
+        for (key, value) in &template.env {
+            hasher.update(key.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(value.as_bytes());
+            hasher.update(&[0]);
+        }
     }
     for (name, source) in selected {
         hasher.update(name.as_bytes());

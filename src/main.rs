@@ -11,17 +11,15 @@ mod util;
 use std::path::Path;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{Result, bail};
 use clap::Parser;
 
-use cli::{Cli, Command};
+use cli::{Cli, Command, ProfilesCommand};
 use config::Config;
 use materialize::{apply_links, managed_status, plan_links};
 use paths::AppPaths;
 use profiles::ProfileStore;
-use state::{
-    ProfileLock, TargetLock, disable_profiles, enable_profiles, load_enabled, save_enabled,
-};
+use state::{InventoryLock, TargetLock, remove_legacy_activation_state};
 
 fn main() -> ExitCode {
     match run() {
@@ -39,12 +37,24 @@ fn run() -> Result<ExitCode> {
     let store = ProfileStore::new(paths.profiles());
 
     match cli.command {
-        Command::Profiles => {
-            for profile in store.list_profiles()? {
-                println!("{profile}");
+        Command::Profiles { command } => match command {
+            None => {
+                let _lock = initialize_inventory(&paths, &store, false)?;
+                for profile in store.list_profiles()? {
+                    println!("{profile}");
+                }
             }
-        }
+            Some(ProfilesCommand::New {
+                profiles,
+                disabled,
+                dry_run,
+            }) => {
+                let _lock = initialize_inventory(&paths, &store, dry_run)?;
+                store.create_profiles(&profiles, !disabled, dry_run)?;
+            }
+        },
         Command::Skills { profiles } => {
+            let _lock = initialize_inventory(&paths, &store, false)?;
             let profiles = if profiles.is_empty() {
                 store.list_profiles()?
             } else {
@@ -62,86 +72,85 @@ fn run() -> Result<ExitCode> {
                 println!("{target}");
             }
         }
-        Command::Enabled { target } => {
-            let config = Config::load(&paths.config)?;
-            let (name, target) = config.select_target(target.as_deref())?;
-            target.persistent_path(name)?;
-            for entry in load_enabled(&paths.target_state(name))? {
-                println!("{}", entry.name);
+        Command::Enabled => {
+            let _lock = initialize_inventory(&paths, &store, false)?;
+            for profile in store.enabled_profiles()? {
+                println!("{profile}");
             }
         }
         Command::Status { target } => {
+            let _lock = initialize_inventory(&paths, &store, false)?;
             let config = Config::load(&paths.config)?;
-            let (name, target) = config.select_target(target.as_deref())?;
-            let target_path = target.persistent_path(name)?;
-            for (skill, source, destination) in managed_status(&target_path, store.root())? {
-                println!("{skill}\t{}\t{}", source.display(), destination.display());
+            let targets = config.persistent_targets(target.as_deref())?;
+            let show_target = target.is_none();
+            for (target_name, target_path) in targets {
+                for (skill, source, destination) in managed_status(&target_path, store.root())? {
+                    if show_target {
+                        println!(
+                            "{target_name}\t{skill}\t{}\t{}",
+                            source.display(),
+                            destination.display()
+                        );
+                    } else {
+                        println!("{skill}\t{}\t{}", source.display(), destination.display());
+                    }
+                }
             }
         }
-        Command::Enable {
-            profiles,
+        Command::Enable { profiles, dry_run } => {
+            let _lock = initialize_inventory(&paths, &store, dry_run)?;
+            store.set_enabled(&profiles, true, dry_run)?;
+        }
+        Command::Disable { profiles, dry_run } => {
+            let _lock = initialize_inventory(&paths, &store, dry_run)?;
+            store.set_enabled(&profiles, false, dry_run)?;
+        }
+        Command::Apply {
             target,
+            force,
             dry_run,
         } => {
+            let _inventory_lock = initialize_inventory(&paths, &store, dry_run)?;
+            let desired = store.resolve_enabled()?;
             let config = Config::load(&paths.config)?;
-            let (name, target) = config.select_target(target.as_deref())?;
-            mutate_enabled(
-                &paths,
-                &store,
-                name,
-                &target.persistent_path(name)?,
-                &profiles,
-                true,
-                dry_run,
-            )?;
-        }
-        Command::Disable {
-            profiles,
-            target,
-            dry_run,
-        } => {
-            let config = Config::load(&paths.config)?;
-            let (name, target) = config.select_target(target.as_deref())?;
-            mutate_enabled(
-                &paths,
-                &store,
-                name,
-                &target.persistent_path(name)?,
-                &profiles,
-                false,
-                dry_run,
-            )?;
-        }
-        Command::Apply { target, dry_run } => {
-            let config = Config::load(&paths.config)?;
-            let (name, target) = config.select_target(target.as_deref())?;
-            reconcile_existing(
-                &paths,
-                &store,
-                name,
-                &target.persistent_path(name)?,
-                dry_run,
-            )?;
+            let targets = config.persistent_targets(target.as_deref())?;
+            let _target_locks = if dry_run {
+                Vec::new()
+            } else {
+                targets
+                    .iter()
+                    .map(|(name, _)| TargetLock::acquire(&paths.target_state(name)))
+                    .collect::<Result<Vec<_>>>()?
+            };
+            let plans = targets
+                .iter()
+                .map(|(_, path)| {
+                    plan_links(&desired, path, store.root(), force)
+                        .map(|operations| (path.clone(), operations))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            for (target, operations) in plans {
+                apply_links(&operations, &target, dry_run)?;
+            }
         }
         Command::Shell {
             target,
+            mut targets,
             profiles: _,
             skills: _,
             shell_args,
         } => {
+            if let Some(target) = target {
+                targets.push(target);
+            }
+            let inventory_lock = initialize_inventory(&paths, &store, false)?;
             let config = Config::load(&paths.config)?;
-            let template = config
-                .target(&target)?
-                .shell
-                .as_ref()
-                .with_context(|| format!("target {target} has no shell template"))?;
-            let inherited = load_enabled(&paths.target_state(&target))?
-                .into_iter()
-                .map(|entry| entry.name)
-                .collect::<Vec<_>>();
+            let adapters = config.shell_adapters(&targets)?;
+            let inherited = store.enabled_profiles()?;
             let selectors = cli::selectors_from_process_args("shell");
             let selected = store.resolve_selectors(&inherited, &selectors)?;
-            let status = shell::run_shell(&paths, &target, template, &selected, &shell_args)?;
+            drop(inventory_lock);
+            let status = shell::run_shell(&paths, &adapters, &selected, &shell_args)?;
             return Ok(exit_status_code(status));
         }
         Command::Export {
@@ -150,9 +159,10 @@ fn run() -> Result<ExitCode> {
             destination,
             dry_run,
         } => {
+            let _lock = initialize_inventory(&paths, &store, dry_run)?;
             let selectors = cli::selectors_from_process_args("export");
             if selectors.is_empty() {
-                anyhow::bail!("export requires at least one --profile or --skill selector");
+                bail!("export requires at least one --profile or --skill selector");
             }
             let selected = store.resolve_selectors(&[], &selectors)?;
             transfer::export_skills(&selected, Path::new(&destination), dry_run)?;
@@ -161,23 +171,44 @@ fn run() -> Result<ExitCode> {
             profile,
             skills,
             source,
+            create,
             replace,
             dry_run,
         } => {
-            let profile_state = paths.profile_state(&profile)?;
-            let _lock = if dry_run {
-                None
-            } else {
-                Some(ProfileLock::acquire(&profile_state)?)
-            };
+            let _lock = initialize_inventory(&paths, &store, dry_run)?;
             transfer::import_skills(
                 &store,
                 &profile,
                 Path::new(&source),
                 &skills,
+                create,
                 replace,
                 dry_run,
             )?;
+        }
+        Command::Update {
+            source,
+            skills,
+            profile,
+            all,
+            dry_run,
+        } => {
+            let _lock = initialize_inventory(&paths, &store, dry_run)?;
+            transfer::update_skills(
+                &store,
+                Path::new(&source),
+                &skills,
+                profile.as_deref(),
+                all,
+                dry_run,
+            )?;
+        }
+        Command::Adopt {
+            target,
+            directory,
+            dry_run,
+        } => {
+            Config::adopt(&paths.config, &target, Path::new(&directory), dry_run)?;
         }
         Command::Gc { dry_run } => shell::gc(&paths, dry_run)?,
         Command::Exec {
@@ -190,76 +221,19 @@ fn run() -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn mutate_enabled(
+fn initialize_inventory(
     paths: &AppPaths,
     store: &ProfileStore,
-    target_name: &str,
-    target_path: &Path,
-    profiles: &[String],
-    enable: bool,
     dry_run: bool,
-) -> Result<()> {
-    let target_state = paths.target_state(target_name);
-    let _lock = if dry_run {
+) -> Result<Option<InventoryLock>> {
+    let lock = if dry_run {
         None
     } else {
-        Some(TargetLock::acquire(&target_state)?)
+        Some(InventoryLock::acquire(&paths.inventory_state())?)
     };
-    let mut entries = load_enabled(&target_state)?;
-    if enable {
-        for profile in profiles {
-            store.skills(profile)?;
-        }
-        enable_profiles(&mut entries, profiles)?;
-    } else {
-        disable_profiles(&mut entries, profiles)?;
-    }
-    let profile_order = entries
-        .iter()
-        .map(|entry| entry.name.clone())
-        .collect::<Vec<_>>();
-    let desired = store.resolve_profiles(&profile_order)?;
-    let operations = plan_links(&desired, target_path, store.root())?;
-
-    if dry_run {
-        for profile in profiles {
-            println!(
-                "{}\t{}\t{}",
-                if enable { "enable" } else { "disable" },
-                target_name,
-                profile
-            );
-        }
-        apply_links(&operations, target_path, true)?;
-        return Ok(());
-    }
-
-    save_enabled(&target_state, &entries)?;
-    apply_links(&operations, target_path, false)
-}
-
-fn reconcile_existing(
-    paths: &AppPaths,
-    store: &ProfileStore,
-    target_name: &str,
-    target_path: &Path,
-    dry_run: bool,
-) -> Result<()> {
-    let target_state = paths.target_state(target_name);
-    let _lock = if dry_run {
-        None
-    } else {
-        Some(TargetLock::acquire(&target_state)?)
-    };
-    let entries = load_enabled(&target_state)?;
-    let profiles = entries
-        .iter()
-        .map(|entry| entry.name.clone())
-        .collect::<Vec<_>>();
-    let desired = store.resolve_profiles(&profiles)?;
-    let operations = plan_links(&desired, target_path, store.root())?;
-    apply_links(&operations, target_path, dry_run)
+    store.initialize_missing_tags(dry_run)?;
+    remove_legacy_activation_state(&paths.state, dry_run)?;
+    Ok(lock)
 }
 
 fn exit_status_code(status: std::process::ExitStatus) -> ExitCode {

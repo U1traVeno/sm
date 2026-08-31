@@ -2,141 +2,139 @@
 
 Language: **English** | [简体中文](zh-cn/getting-started.md)
 
-## Requirements
-
-The current implementation supports macOS and Linux. Building from source requires Rust 1.88 or newer.
-
-`sm` needs a filesystem that can create symbolic links for persistent activation and shell generations. Project import and export use copies instead.
-
-Git is optional at runtime. Use ordinary Git commands when `~/.sm` is a Git checkout.
-
-## Installation
-
-Install from crates.io:
+## 1. Install
 
 ```console
-$ cargo install sm-skill-manager
+cargo install sm-skill-manager
 ```
 
-The crate is named `sm-skill-manager`; the installed executable is `sm`. To install from a project checkout instead:
+The crate installs `sm` and requires Rust 1.88 or newer.
+
+## 2. Create a Profile
 
 ```console
-$ cargo install --path .
+sm profiles new common
 ```
 
-## Create the Skill Repository
-
-`SM_HOME` defaults to `~/.sm`. A profile is an immediate child of `profiles/`, and a skill is an immediate directory inside a profile:
+This creates:
 
 ```text
-~/.sm/
-  profiles/
-    common/
-      shell-tools/
-        SKILL.md
-    coding/
-      code-review/
-        SKILL.md
-      repository-search/
-        SKILL.md
+~/.sm/profiles/common/.smtag
 ```
 
-`sm` identifies profiles and skills by directory name. It does not parse or validate `SKILL.md`.
+with `true`. A profile directory created manually is also valid; sm initializes a missing `.smtag` to `true` when it next reads the inventory.
 
-To synchronize the inventory between machines, make `~/.sm` a normal Git checkout:
+Add skill directories directly or import them:
 
 ```console
-$ git clone git@example.com:you/skills.git ~/.sm
-$ git -C ~/.sm pull --ff-only
+sm import --profile common --from .skills
 ```
 
-`sm` never runs these commands itself.
+## 3. Configure a Target
 
-## Configure a Target
+Register a persistent projection directory:
 
-Create `~/.config/sm/config.toml`:
+```console
+sm adopt agents ~/.agents/skills
+```
+
+Or write `~/.config/sm/config.toml`:
 
 ```toml
-default_target = "pi"
+[targets.agents]
+skills_dir = "~/.agents/skills"
+```
 
-[targets.pi]
-skills_dir = "~/.pi/agent/skills"
+A target never owns activation state. Every target receives the same global set.
 
+## 4. Apply
+
+```console
+sm apply
+```
+
+This creates symlinks for all skills in profiles whose `.smtag` is `true`.
+
+If an installer has written real directories into the target, inspect first:
+
+```console
+sm apply --force --dry-run
+```
+
+Then reconcile:
+
+```console
+sm apply --force
+```
+
+Force removes all non-hidden real directories from selected targets. Ordinary files, hidden entries, and unrelated external symlinks are preserved.
+
+## 5. Enable and Disable
+
+```console
+sm disable common
+sm apply
+
+sm enable common
+sm apply
+```
+
+Enable and disable only update `.smtag`; apply is always explicit.
+
+## 6. Add Installer Skills
+
+After an external installer writes to a target, import only the new skills you want:
+
+```console
+sm profiles new matt
+sm import --profile matt \
+  --from ~/.agents/skills \
+  --skill code-review \
+  --skill tdd
+sm apply --force
+```
+
+Import leaves source directories unchanged. Force apply removes installer directories and restores the desired symlinks.
+
+## 7. Update Managed Skills
+
+Download broadly, then update only names already present in sm:
+
+```console
+npx skills@latest add mattpocock/skills
+sm update --from ~/.agents/skills --profile matt
+sm apply --force
+```
+
+Unknown downloads are never added by update.
+
+## 8. Configure Isolated Shells
+
+Add an adapter:
+
+```toml
 [targets.pi.shell]
 command = "pi"
 args = ["--no-skills", "--skill", "{skills}"]
 ```
 
-The persistent target and shell template are independent capabilities:
-
-- `skills_dir` allows `enable` and `disable`.
-- `shell` allows isolated `sm shell` sessions.
-- A target may define either capability or both.
-
-See [Targets and Templates](targets.md) for the complete format.
-
-## Activate Profiles
+Start a temporary profile scope:
 
 ```console
-$ sm enable common coding
-$ sm enabled
-common
-coding
+sm shell --profile matt
+(sm) $ pi
 ```
 
-The order shown by `sm enabled` is precedence order from lowest to highest. Enabling an already-enabled profile moves it to the end:
+With no explicit profiles, shell generations inherit the global set. With no target filter, all configured adapters are wrapped.
+
+## 9. Inspect
 
 ```console
-$ sm enable common
-$ sm enabled
-coding
-common
+sm profiles
+sm skills
+sm enabled
+sm targets
+sm status
 ```
 
-If both profiles contain `code-review`, the copy under `common` is now visible.
-
-Disable a profile without affecting the others:
-
-```console
-$ sm disable common
-```
-
-Use `--target` when no default target is configured or when activating a different target:
-
-```console
-$ sm enable research --target claude
-```
-
-## Inspect State
-
-List available data with line-oriented output:
-
-```console
-$ sm profiles
-coding
-common
-research
-
-$ sm skills coding
-coding/code-review
-coding/repository-search
-
-$ sm targets
-claude
-pi
-```
-
-Inspect the materialized winners for a target:
-
-```console
-$ sm status --target pi
-code-review	/Users/me/.sm/profiles/coding/code-review	/Users/me/.pi/agent/skills/code-review
-```
-
-Paths in actual output are absolute. Fields are separated by tabs.
-
-## Next Steps
-
-- Read [Profiles and Activation](profiles.md) for precedence and collision behavior.
-- Read [Isolated Shells](shell.md) before running concurrent agents with different skill sets.
-- Read [Project Import and Export](project-skills.md) to vendor skills into a repository.
+Use `--dry-run` on mutating commands to validate planned operations without changing files.

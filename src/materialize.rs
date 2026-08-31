@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,13 +16,32 @@ pub enum LinkOperation {
     Unlink {
         destination: PathBuf,
     },
+    RemoveDirectory {
+        destination: PathBuf,
+    },
 }
 
 pub fn plan_links(
     desired: &BTreeMap<String, PathBuf>,
     target: &Path,
     profiles_root: &Path,
+    force: bool,
 ) -> Result<Vec<LinkOperation>> {
+    let normalized_target = target
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_path(target));
+    let normalized_profiles = profiles_root
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_path(profiles_root));
+    if normalized_target.starts_with(&normalized_profiles)
+        || normalized_profiles.starts_with(&normalized_target)
+    {
+        bail!(
+            "persistent target overlaps the profile inventory: {} and {}",
+            target.display(),
+            profiles_root.display()
+        );
+    }
     if let Ok(metadata) = fs::symlink_metadata(target)
         && (!metadata.is_dir() || metadata.file_type().is_symlink())
     {
@@ -32,14 +51,32 @@ pub fn plan_links(
     let mut existing = BTreeMap::new();
     if target.exists() {
         for entry in sorted_entries(target)? {
-            existing.insert(
-                entry.file_name().to_string_lossy().into_owned(),
-                entry.path(),
-            );
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            existing.insert(name, entry.path());
         }
     }
 
     let mut operations = Vec::new();
+    let mut removed_directories = BTreeSet::new();
+    for (name, path) in &existing {
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            if !force {
+                bail!(
+                    "real directory blocks target reconciliation: {}; rerun with --force to remove it",
+                    path.display()
+                );
+            }
+            operations.push(LinkOperation::RemoveDirectory {
+                destination: path.clone(),
+            });
+            removed_directories.insert(name.clone());
+        }
+    }
+
     for (name, source) in desired {
         let destination = target.join(name);
         match existing.remove(name) {
@@ -47,6 +84,12 @@ pub fn plan_links(
                 source: source.clone(),
                 destination,
             }),
+            Some(_path) if removed_directories.contains(name) => {
+                operations.push(LinkOperation::Link {
+                    source: source.clone(),
+                    destination,
+                });
+            }
             Some(path) => {
                 let metadata = fs::symlink_metadata(&path)?;
                 if !metadata.file_type().is_symlink() {
@@ -59,7 +102,7 @@ pub fn plan_links(
                 if current == normalize_path(source) {
                     continue;
                 }
-                if !is_managed_target(&current, profiles_root) {
+                if !is_managed_skill_target(&current, profiles_root) {
                     bail!(
                         "unmanaged target link blocks skill {name}: {}",
                         path.display()
@@ -73,11 +116,14 @@ pub fn plan_links(
         }
     }
 
-    for path in existing.into_values() {
+    for (name, path) in existing {
+        if removed_directories.contains(&name) {
+            continue;
+        }
         let metadata = fs::symlink_metadata(&path)?;
         if metadata.file_type().is_symlink() {
             let current = resolved_link_target(&path)?;
-            if is_managed_target(&current, profiles_root) {
+            if is_managed_skill_target(&current, profiles_root) {
                 operations.push(LinkOperation::Unlink { destination: path });
             }
         }
@@ -97,6 +143,9 @@ pub fn apply_links(operations: &[LinkOperation], target: &Path, dry_run: bool) -
                 }
                 LinkOperation::Unlink { destination } => {
                     println!("unlink\t{}", destination.display());
+                }
+                LinkOperation::RemoveDirectory { destination } => {
+                    println!("remove\t{}", destination.display());
                 }
             }
         }
@@ -118,6 +167,14 @@ pub fn apply_links(operations: &[LinkOperation], target: &Path, dry_run: bool) -
                     format!("failed to remove managed link {}", destination.display())
                 })?;
             }
+            LinkOperation::RemoveDirectory { destination } => {
+                fs::remove_dir_all(destination).with_context(|| {
+                    format!(
+                        "failed to remove target directory {}",
+                        destination.display()
+                    )
+                })?;
+            }
         }
     }
     Ok(())
@@ -137,7 +194,7 @@ pub fn managed_status(
             continue;
         }
         let source = resolved_link_target(&entry.path())?;
-        if is_managed_target(&source, profiles_root) {
+        if is_managed_skill_target(&source, profiles_root) {
             result.push((
                 entry.file_name().to_string_lossy().into_owned(),
                 source,
@@ -146,6 +203,32 @@ pub fn managed_status(
         }
     }
     Ok(result)
+}
+
+pub fn resolved_link_target(link: &Path) -> Result<PathBuf> {
+    let target =
+        fs::read_link(link).with_context(|| format!("failed to read link {}", link.display()))?;
+    let absolute = if target.is_absolute() {
+        target
+    } else {
+        link.parent().context("link has no parent")?.join(target)
+    };
+    Ok(absolute
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_path(&absolute)))
+}
+
+pub fn is_managed_skill_target(target: &Path, profiles_root: &Path) -> bool {
+    let target = normalize_path(target);
+    let profiles_root = normalize_path(profiles_root);
+    let Ok(relative) = target.strip_prefix(&profiles_root) else {
+        return false;
+    };
+    let components = relative.components().collect::<Vec<_>>();
+    components.len() == 2
+        && components
+            .iter()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 fn atomic_link(source: &Path, destination: &Path) -> Result<()> {
@@ -171,28 +254,4 @@ fn atomic_link(source: &Path, destination: &Path) -> Result<()> {
             })
         }
     }
-}
-
-fn resolved_link_target(link: &Path) -> Result<PathBuf> {
-    let target =
-        fs::read_link(link).with_context(|| format!("failed to read link {}", link.display()))?;
-    let absolute = if target.is_absolute() {
-        target
-    } else {
-        link.parent().context("link has no parent")?.join(target)
-    };
-    Ok(normalize_path(&absolute))
-}
-
-fn is_managed_target(target: &Path, profiles_root: &Path) -> bool {
-    let target = normalize_path(target);
-    let profiles_root = normalize_path(profiles_root);
-    let Ok(relative) = target.strip_prefix(&profiles_root) else {
-        return false;
-    };
-    let components = relative.components().collect::<Vec<_>>();
-    components.len() == 2
-        && components
-            .iter()
-            .all(|component| matches!(component, std::path::Component::Normal(_)))
 }

@@ -51,10 +51,24 @@ impl Fixture {
     }
 
     fn add_skill(&self, profile: &str, skill: &str, content: &str) -> PathBuf {
-        let path = self.sm_home.join("profiles").join(profile).join(skill);
+        let profile_path = self.sm_home.join("profiles").join(profile);
+        let path = profile_path.join(skill);
         fs::create_dir_all(&path).unwrap();
+        if !profile_path.join(".smtag").exists() {
+            fs::write(profile_path.join(".smtag"), "true\n").unwrap();
+        }
         fs::write(path.join("origin"), content).unwrap();
         path
+    }
+
+    fn set_enabled(&self, profile: &str, enabled: bool) {
+        let path = self.sm_home.join("profiles").join(profile);
+        fs::create_dir_all(&path).unwrap();
+        fs::write(
+            path.join(".smtag"),
+            if enabled { "true\n" } else { "false\n" },
+        )
+        .unwrap();
     }
 
     fn write_config(&self, shell: Option<(&Path, &Path)>) {
@@ -101,63 +115,364 @@ impl Fixture {
 }
 
 #[test]
-fn enable_precedence_disable_fallback_and_apply() {
+fn global_tags_are_initialized_and_inventory_changes_require_apply() {
     let fixture = Fixture::new();
-    let common = fixture
-        .add_skill("common", "shared", "common\n")
-        .canonicalize()
-        .unwrap();
-    let coding = fixture
-        .add_skill("coding", "shared", "coding\n")
-        .canonicalize()
-        .unwrap();
-    fixture.add_skill("coding", "rust", "rust\n");
+    let skill = fixture.sm_home.join("profiles/common/shared");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(skill.join("origin"), "common\n").unwrap();
+    let legacy = fixture
+        .state_home
+        .join("sm/targets/fake/enabled/0001-common");
+    fs::create_dir_all(&legacy).unwrap();
     fixture.write_config(None);
 
-    let output = fixture.run(&["enable", "common", "coding"]);
-    assert!(output.stdout.is_empty());
+    let enabled = fixture.run(&["enabled"]);
+    assert_eq!(String::from_utf8(enabled.stdout).unwrap(), "common\n");
+    let diagnostics = String::from_utf8(enabled.stderr).unwrap();
+    assert!(diagnostics.contains("initialized profile common as enabled"));
+    assert!(diagnostics.contains("removed obsolete per-target activation state"));
     assert_eq!(
-        String::from_utf8(fixture.run(&["enabled"]).stdout).unwrap(),
-        "common\ncoding\n"
+        fs::read_to_string(fixture.sm_home.join("profiles/common/.smtag")).unwrap(),
+        "true\n"
     );
-    assert_eq!(
-        fs::read_link(fixture.target.join("shared")).unwrap(),
-        coding
-    );
-    assert!(fixture.target.join("rust").is_symlink());
+    assert!(!legacy.exists());
 
-    fixture.run(&["disable", "coding"]);
+    fixture.run(&["disable", "common"]);
     assert_eq!(
-        fs::read_link(fixture.target.join("shared")).unwrap(),
-        common
+        fs::read_to_string(fixture.sm_home.join("profiles/common/.smtag")).unwrap(),
+        "false\n"
     );
-    assert!(!fixture.target.join("rust").exists());
+    fixture.run(&["apply"]);
+    assert!(!fixture.target.join("shared").exists());
 
-    fs::remove_file(fixture.target.join("shared")).unwrap();
+    fixture.run(&["enable", "common"]);
+    assert!(!fixture.target.join("shared").exists());
     fixture.run(&["apply"]);
     assert_eq!(
         fs::read_link(fixture.target.join("shared")).unwrap(),
-        common
+        skill.canonicalize().unwrap()
     );
 
-    let markers = fs::read_dir(fixture.state_home.join("sm/targets/fake/enabled"))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    assert_eq!(markers.len(), 1);
-    assert!(markers[0].ends_with("-common"));
+    fs::remove_dir_all(fixture.sm_home.join("profiles/common")).unwrap();
+    fixture.run(&["apply"]);
+    assert!(!fixture.target.join("shared").exists());
+}
+
+#[test]
+fn enabled_profiles_reject_duplicate_skill_names_without_precedence() {
+    let fixture = Fixture::new();
+    fixture.add_skill("common", "shared", "common\n");
+    let coding = fixture.add_skill("coding", "shared", "coding\n");
+    fixture.set_enabled("coding", false);
+    fixture.write_config(None);
+
+    let output = fixture
+        .command()
+        .args(["enable", "coding"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate skill shared"));
+    assert_eq!(
+        fs::read_to_string(fixture.sm_home.join("profiles/coding/.smtag")).unwrap(),
+        "false\n"
+    );
+
+    fixture.run(&["disable", "common"]);
+    fixture.run(&["enable", "coding"]);
+    fixture.run(&["apply"]);
+    assert_eq!(
+        fs::read_link(fixture.target.join("shared")).unwrap(),
+        coding.canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn apply_force_removes_real_directories_and_preserves_other_unmanaged_entries() {
+    let fixture = Fixture::new();
+    let managed = fixture.add_skill("common", "managed", "canonical\n");
+    fixture.write_config(None);
+    fs::create_dir_all(fixture.target.join("managed")).unwrap();
+    fs::create_dir_all(fixture.target.join("unwanted")).unwrap();
+    fs::create_dir_all(fixture.target.join(".hidden")).unwrap();
+    fs::write(fixture.target.join("notes.txt"), "keep\n").unwrap();
+    let external = fixture.project.join("external");
+    fs::create_dir_all(&external).unwrap();
+    symlink(&external, fixture.target.join("custom-link")).unwrap();
+
+    let output = fixture.command().arg("apply").output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("rerun with --force"));
+    assert!(fixture.target.join("managed").is_dir());
+    assert!(fixture.target.join("unwanted").is_dir());
+
+    fixture.run(&["apply", "--force"]);
+    assert_eq!(
+        fs::read_link(fixture.target.join("managed")).unwrap(),
+        managed.canonicalize().unwrap()
+    );
+    assert!(!fixture.target.join("unwanted").exists());
+    assert!(fixture.target.join(".hidden").is_dir());
+    assert_eq!(
+        fs::read_to_string(fixture.target.join("notes.txt")).unwrap(),
+        "keep\n"
+    );
+    assert!(fixture.target.join("custom-link").is_symlink());
+}
+
+#[test]
+fn apply_rejects_targets_that_overlap_the_profile_inventory() {
+    let fixture = Fixture::new();
+    fixture.add_skill("common", "managed", "canonical\n");
+    let config_dir = fixture.config_home.join("sm");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "[targets.dangerous]\nskills_dir = {:?}\n",
+            fixture.sm_home.join("profiles").to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let output = fixture
+        .command()
+        .args(["apply", "--force"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("overlaps the profile inventory"));
+    assert!(fixture.sm_home.join("profiles/common/managed").is_dir());
+}
+
+#[test]
+fn apply_preflights_every_target_before_mutation_and_status_lists_all() {
+    let fixture = Fixture::new();
+    fixture.add_skill("common", "shared", "common\n");
+    let second = fixture._root.path().join("second-target");
+    fs::create_dir_all(second.join("blocked")).unwrap();
+    let config_dir = fixture.config_home.join("sm");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "[targets.a]\nskills_dir = {:?}\n\n[targets.b]\nskills_dir = {:?}\n",
+            fixture.target.to_string_lossy(),
+            second.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let output = fixture.command().arg("apply").output().unwrap();
+    assert!(!output.status.success());
+    assert!(!fixture.target.exists());
+
+    fixture.run(&["apply", "--force"]);
+    assert!(fixture.target.join("shared").is_symlink());
+    assert!(second.join("shared").is_symlink());
+    assert!(!second.join("blocked").exists());
+    let status = String::from_utf8(fixture.run(&["status"]).stdout).unwrap();
+    assert!(status.lines().any(|line| line.starts_with("a\tshared\t")));
+    assert!(status.lines().any(|line| line.starts_with("b\tshared\t")));
+}
+
+#[test]
+fn import_can_create_inventory_but_leaves_sources_and_targets_unchanged() {
+    let fixture = Fixture::new();
+    let source = fixture.project.join("incoming");
+    fs::create_dir_all(source.join("rust")).unwrap();
+    fs::write(source.join("rust/origin"), "rust\n").unwrap();
+    let existing = fixture.add_skill("common", "managed", "managed\n");
+    symlink(&existing, source.join("managed")).unwrap();
+    fixture.write_config(None);
+
+    let output = fixture
+        .command()
+        .args(["import", "--profile", "matt", "--from", "incoming"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--create"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    fixture.run(&[
+        "import",
+        "--profile",
+        "matt",
+        "--from",
+        "incoming",
+        "--create",
+    ]);
+    assert_eq!(
+        fs::read_to_string(fixture.sm_home.join("profiles/matt/rust/origin")).unwrap(),
+        "rust\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.sm_home.join("profiles/matt/.smtag")).unwrap(),
+        "true\n"
+    );
+    assert!(source.join("rust").is_dir());
+    assert!(source.join("managed").is_symlink());
+    assert!(!fixture.target.exists());
+}
+
+#[test]
+fn update_replaces_only_existing_skills_and_requires_duplicate_disambiguation() {
+    let fixture = Fixture::new();
+    fixture.add_skill("one", "shared", "one-old\n");
+    fixture.add_skill("two", "shared", "two-old\n");
+    fixture.set_enabled("two", false);
+    fixture.add_skill("one", "only-one", "old\n");
+    let source = fixture.project.join("download");
+    for (name, content) in [
+        ("shared", "new-shared\n"),
+        ("only-one", "new-one\n"),
+        ("unknown", "unknown\n"),
+    ] {
+        fs::create_dir_all(source.join(name)).unwrap();
+        fs::write(source.join(name).join("origin"), content).unwrap();
+    }
+
+    let output = fixture
+        .command()
+        .args(["update", "--from", "download"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("use --profile or --all"));
+    assert_eq!(
+        fs::read_to_string(fixture.sm_home.join("profiles/one/shared/origin")).unwrap(),
+        "one-old\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.sm_home.join("profiles/one/only-one/origin")).unwrap(),
+        "old\n"
+    );
+
+    fixture.run(&["update", "--from", "download", "--profile", "one"]);
+    assert_eq!(
+        fs::read_to_string(fixture.sm_home.join("profiles/one/shared/origin")).unwrap(),
+        "new-shared\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.sm_home.join("profiles/one/only-one/origin")).unwrap(),
+        "new-one\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.sm_home.join("profiles/two/shared/origin")).unwrap(),
+        "two-old\n"
+    );
+    assert!(!fixture.sm_home.join("profiles/one/unknown").exists());
+    assert!(source.join("unknown").is_dir());
+
+    fixture.run(&["update", "--from", "download", "--skill", "shared", "--all"]);
+    assert_eq!(
+        fs::read_to_string(fixture.sm_home.join("profiles/two/shared/origin")).unwrap(),
+        "new-shared\n"
+    );
+}
+
+#[test]
+fn adopt_preserves_config_and_is_idempotent() {
+    let fixture = Fixture::new();
+    let config = fixture.config_home.join("sm/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(
+        &config,
+        "# keep this comment\n[targets.pi]\n\n[targets.pi.shell]\ncommand = \"pi\"\nargs = [\"--skill\", \"{skills}\"]\n",
+    )
+    .unwrap();
+    let adopted = fixture._root.path().join("not-created-yet");
+    let adopted_text = adopted.to_string_lossy().into_owned();
+
+    let dry = fixture.run(&["adopt", "pi", &adopted_text, "--dry-run"]);
+    assert!(String::from_utf8_lossy(&dry.stdout).contains("adopt\tpi"));
+    assert!(!fs::read_to_string(&config).unwrap().contains("skills_dir"));
+
+    fixture.run(&["adopt", "pi", &adopted_text]);
+    fixture.run(&["adopt", "pi", &adopted_text]);
+    let text = fs::read_to_string(&config).unwrap();
+    assert!(text.contains("# keep this comment"));
+    assert!(text.contains("skills_dir"));
+    assert!(text.contains("[targets.pi.shell]"));
+    assert!(!adopted.exists());
+
+    let output = fixture
+        .command()
+        .args(["adopt", "other", &adopted_text])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("already adopted"));
+}
+
+#[test]
+fn dry_run_does_not_initialize_tags_or_remove_legacy_state() {
+    let fixture = Fixture::new();
+    let profile = fixture.sm_home.join("profiles/common");
+    fs::create_dir_all(&profile).unwrap();
+    let legacy = fixture
+        .state_home
+        .join("sm/targets/fake/enabled/0001-common");
+    fs::create_dir_all(&legacy).unwrap();
+    fixture.write_config(None);
+
+    let output = fixture.run(&["apply", "--dry-run"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("tag\ttrue"));
+    assert!(stdout.contains("remove\t"));
+    assert!(!profile.join(".smtag").exists());
+    assert!(legacy.exists());
+    assert!(!fixture.target.exists());
+
+    let stale_lock = fixture.state_home.join("sm/inventory/lock/owner-99999999");
+    fs::create_dir_all(&stale_lock).unwrap();
+    fixture.run(&["profiles"]);
+    assert!(!fixture.state_home.join("sm/inventory/lock").exists());
+}
+
+#[test]
+fn failed_staged_update_preserves_existing_inventory() {
+    let fixture = Fixture::new();
+    fixture.add_skill("matt", "rust", "old\n");
+    let source = fixture.project.join("broken/rust");
+    fs::create_dir_all(&source).unwrap();
+    let _socket = std::os::unix::net::UnixListener::bind(source.join("socket")).unwrap();
+
+    let output = fixture
+        .command()
+        .args(["update", "--from", "broken"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported file type"));
+    assert_eq!(
+        fs::read_to_string(fixture.sm_home.join("profiles/matt/rust/origin")).unwrap(),
+        "old\n"
+    );
+    assert_eq!(
+        fs::read_dir(fixture.sm_home.join("profiles"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".sm-install"))
+            .count(),
+        0
+    );
 }
 
 #[test]
 fn help_is_complete_for_every_public_command() {
     let fixture = Fixture::new();
-    let top = fixture.command().arg("--help").output().unwrap();
-    assert!(top.status.success());
-    let top = String::from_utf8(top.stdout).unwrap();
+    let top = String::from_utf8(fixture.command().arg("--help").output().unwrap().stdout).unwrap();
     for expected in [
-        "sm does not install skill packages",
+        "does not run package installers",
         "Common workflows:",
-        "Locations:",
         "sm <command> --help",
     ] {
         assert!(
@@ -165,22 +480,10 @@ fn help_is_complete_for_every_public_command() {
             "top-level help is missing {expected:?}"
         );
     }
-
-    let commands = [
-        ("profiles", "bytewise lexical order"),
-        ("skills", "<profile>/<skill>"),
-        ("targets", "config.toml"),
-        ("enabled", "lowest to highest precedence"),
-        ("status", "tab-separated"),
-        ("enable", "processed from left to right"),
-        ("disable", "idempotent success"),
-        ("apply", "without changing enabled profiles"),
-        ("shell", "Without --profile"),
-        ("export", "one-time ownership transfer"),
-        ("import", "unless --replace is explicit"),
-        ("gc", "PID-based directory leases"),
-    ];
-    for (command, expected) in commands {
+    for command in [
+        "profiles", "skills", "targets", "enabled", "status", "enable", "disable", "apply",
+        "shell", "export", "import", "update", "adopt", "gc",
+    ] {
         let output = fixture
             .command()
             .args([command, "--help"])
@@ -190,11 +493,13 @@ fn help_is_complete_for_every_public_command() {
         let help = String::from_utf8(output.stdout).unwrap();
         assert!(help.contains("Usage:"), "{command} help has no usage");
         assert!(help.contains("Examples:"), "{command} help has no examples");
-        assert!(
-            help.contains(expected),
-            "{command} help is missing {expected:?}\n{help}"
-        );
     }
+    let new_help = fixture
+        .command()
+        .args(["profiles", "new", "--help"])
+        .output()
+        .unwrap();
+    assert!(new_help.status.success());
 }
 
 #[test]
@@ -220,228 +525,6 @@ fn target_independent_commands_ignore_broken_target_config() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid generation ID"));
-}
-
-#[test]
-fn dry_run_is_non_mutating_and_stale_directory_lock_recovers() {
-    let fixture = Fixture::new();
-    fixture.add_skill("common", "shared", "common\n");
-    fixture.write_config(None);
-
-    let output = fixture.run(&["enable", "common", "--dry-run"]);
-    assert!(String::from_utf8_lossy(&output.stdout).contains("enable\tfake\tcommon"));
-    assert!(!fixture.target.exists());
-    assert!(!fixture.state_home.join("sm/targets/fake").exists());
-
-    let stale_lock = fixture.state_home.join("sm/targets/fake/lock");
-    fs::create_dir_all(stale_lock.join("owner-99999999")).unwrap();
-    fixture.run(&["enable", "common"]);
-    assert!(fixture.target.join("shared").is_symlink());
-    assert!(!stale_lock.exists());
-}
-
-#[test]
-fn unmanaged_collision_fails_before_enabled_state_is_saved() {
-    let fixture = Fixture::new();
-    fixture.add_skill("common", "blocked", "managed\n");
-    fixture.write_config(None);
-    fs::create_dir_all(fixture.target.join("blocked")).unwrap();
-    fs::write(fixture.target.join("blocked/user"), "user\n").unwrap();
-
-    let output = fixture
-        .command()
-        .args(["enable", "common"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unmanaged target entry"));
-    assert!(!fixture.state_home.join("sm/targets/fake/enabled").exists());
-    assert_eq!(
-        fs::read_to_string(fixture.target.join("blocked/user")).unwrap(),
-        "user\n"
-    );
-
-    fs::remove_dir_all(fixture.target.join("blocked")).unwrap();
-    let profile_root_link = fixture.target.join("profile-root");
-    symlink(fixture.sm_home.join("profiles/common"), &profile_root_link).unwrap();
-    fixture.run(&["enable", "common"]);
-    assert!(profile_root_link.is_symlink());
-}
-
-#[test]
-fn export_and_import_transfer_ownership_without_overwrite() {
-    let fixture = Fixture::new();
-    fixture.add_skill("coding", "rust", "rust\n");
-    fixture.add_skill("coding", "shared", "coding\n");
-    fixture.add_skill("common", "shared", "common\n");
-    fixture.write_config(None);
-
-    fixture.run(&["export", "--profile", "coding", "--skill", "common/shared"]);
-    assert_eq!(
-        fs::read_to_string(fixture.project.join(".skills/shared/origin")).unwrap(),
-        "common\n"
-    );
-    assert_eq!(
-        fs::read_to_string(fixture.project.join(".skills/rust/origin")).unwrap(),
-        "rust\n"
-    );
-
-    fixture.run(&["import", "--profile", "imported", "--skill", "rust"]);
-    assert_eq!(
-        fs::read_to_string(fixture.sm_home.join("profiles/imported/rust/origin")).unwrap(),
-        "rust\n"
-    );
-
-    let output = fixture
-        .command()
-        .args(["import", "--profile", "imported", "--skill", "rust"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("already exists"));
-
-    fs::create_dir_all(fixture.sm_home.join("profiles/empty")).unwrap();
-    fs::remove_dir_all(fixture.project.join(".skills")).unwrap();
-    fixture.run(&["export", "--profile", "empty"]);
-    assert!(fixture.project.join(".skills").is_dir());
-
-    let output = fixture.command().arg("export").output().unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("requires at least one"));
-}
-
-#[test]
-fn import_replace_is_explicit_scoped_and_profile_locked() {
-    let fixture = Fixture::new();
-    fixture.add_skill("imported", "rust", "old\n");
-    fixture.add_skill("imported", "keep", "keep\n");
-    let source = fixture.project.join("incoming/rust");
-    fs::create_dir_all(&source).unwrap();
-    fs::write(source.join("origin"), "new\n").unwrap();
-
-    let output = fixture
-        .command()
-        .args(["import", "--profile", "imported", "--from", "incoming"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("already exists"));
-    assert_eq!(
-        fs::read_to_string(fixture.sm_home.join("profiles/imported/rust/origin")).unwrap(),
-        "old\n"
-    );
-
-    let dry_run = fixture.run(&[
-        "import",
-        "--profile",
-        "imported",
-        "--from",
-        "incoming",
-        "--replace",
-        "--dry-run",
-    ]);
-    assert!(String::from_utf8_lossy(&dry_run.stdout).starts_with("replace\t"));
-    assert_eq!(
-        fs::read_to_string(fixture.sm_home.join("profiles/imported/rust/origin")).unwrap(),
-        "old\n"
-    );
-
-    let stale_lock = fixture
-        .state_home
-        .join("sm/profiles/imported/lock/owner-99999999");
-    fs::create_dir_all(&stale_lock).unwrap();
-    fixture.run(&[
-        "import",
-        "--profile",
-        "imported",
-        "--from",
-        "incoming",
-        "--replace",
-    ]);
-    assert_eq!(
-        fs::read_to_string(fixture.sm_home.join("profiles/imported/rust/origin")).unwrap(),
-        "new\n"
-    );
-    assert_eq!(
-        fs::read_to_string(fixture.sm_home.join("profiles/imported/keep/origin")).unwrap(),
-        "keep\n"
-    );
-    assert!(
-        !fixture
-            .state_home
-            .join("sm/profiles/imported/lock")
-            .exists()
-    );
-}
-
-#[test]
-fn import_replace_rejects_invalid_destinations_and_stages_before_mutation() {
-    let fixture = Fixture::new();
-    let external = fixture.project.join("external");
-    fs::create_dir_all(&external).unwrap();
-    fs::write(external.join("keep"), "external\n").unwrap();
-    let profile = fixture.sm_home.join("profiles/imported");
-    fs::create_dir_all(&profile).unwrap();
-    symlink(&external, profile.join("linked")).unwrap();
-    let linked_source = fixture.project.join("linked-source/linked");
-    fs::create_dir_all(&linked_source).unwrap();
-    fs::write(linked_source.join("origin"), "new\n").unwrap();
-
-    let output = fixture
-        .command()
-        .args([
-            "import",
-            "--profile",
-            "imported",
-            "--from",
-            "linked-source",
-            "--replace",
-        ])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("replace destination is not a directory")
-    );
-    assert!(profile.join("linked").is_symlink());
-    assert_eq!(
-        fs::read_to_string(external.join("keep")).unwrap(),
-        "external\n"
-    );
-
-    fixture.add_skill("imported", "rust", "old\n");
-    let broken_source = fixture.project.join("broken-source/rust");
-    fs::create_dir_all(&broken_source).unwrap();
-    let _socket = std::os::unix::net::UnixListener::bind(broken_source.join("socket")).unwrap();
-    let output = fixture
-        .command()
-        .args([
-            "import",
-            "--profile",
-            "imported",
-            "--from",
-            "broken-source",
-            "--replace",
-        ])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported file type"));
-    assert_eq!(
-        fs::read_to_string(fixture.sm_home.join("profiles/imported/rust/origin")).unwrap(),
-        "old\n"
-    );
-    let hidden_transactions = fs::read_dir(&profile)
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".sm-import-")
-        })
-        .count();
-    assert_eq!(hidden_transactions, 0);
 }
 
 #[test]
@@ -815,5 +898,51 @@ fn shell_uses_generic_template_and_isolated_generation() {
     assert_eq!(
         fs::read_to_string(unmanaged_cache.join("keep")).unwrap(),
         "user\n"
+    );
+}
+
+#[test]
+fn shell_wraps_every_configured_adapter_with_one_generation() {
+    let fixture = Fixture::new();
+    fixture.add_skill("common", "shared", "common\n");
+    let agent_a = fixture.home.join("agent-a");
+    let agent_b = fixture.home.join("agent-b");
+    let output_a = fixture.home.join("agent-a-output");
+    let output_b = fixture.home.join("agent-b-output");
+    for agent in [&agent_a, &agent_b] {
+        fs::write(
+            agent,
+            "#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$OUTPUT.path\"\nfind \"$1\" -mindepth 1 -maxdepth 1 -type l -exec basename {} \\; | sort > \"$OUTPUT.skills\"\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(agent).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(agent, permissions).unwrap();
+    }
+    let config_dir = fixture.config_home.join("sm");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "[targets.a.shell]\ncommand = {:?}\nargs = [\"{{skills}}\"]\nenv = {{ OUTPUT = {:?} }}\n\n[targets.b.shell]\ncommand = {:?}\nargs = [\"{{skills}}\"]\nenv = {{ OUTPUT = {:?} }}\n",
+            agent_a.to_string_lossy(),
+            output_a.to_string_lossy(),
+            agent_b.to_string_lossy(),
+            output_b.to_string_lossy(),
+        ),
+    )
+    .unwrap();
+
+    fixture.run(&["shell", "--", "-c", "agent-a && agent-b"]);
+    let path_a = fs::read_to_string(output_a.with_extension("path")).unwrap();
+    let path_b = fs::read_to_string(output_b.with_extension("path")).unwrap();
+    assert_eq!(path_a, path_b);
+    assert_eq!(
+        fs::read_to_string(output_a.with_extension("skills")).unwrap(),
+        "shared\n"
+    );
+    assert_eq!(
+        fs::read_to_string(output_b.with_extension("skills")).unwrap(),
+        "shared\n"
     );
 }

@@ -5,8 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 
-use crate::profiles::ProfileStore;
-use crate::util::{absolute_path, sorted_entries, symlink_dir, validate_component};
+use crate::materialize::{is_managed_skill_target, resolved_link_target};
+use crate::profiles::{ProfileStore, TAG_FILE};
+use crate::util::{absolute_path, normalize_path, sorted_entries, symlink_dir, validate_component};
 
 pub fn export_skills(
     selected: &BTreeMap<String, PathBuf>,
@@ -14,7 +15,7 @@ pub fn export_skills(
     dry_run: bool,
 ) -> Result<()> {
     let destination = absolute_path(destination)?;
-    preflight_destination(selected.keys(), &destination)?;
+    preflight_export(selected.keys(), &destination)?;
     if dry_run {
         for (name, source) in selected {
             println!(
@@ -25,55 +26,168 @@ pub fn export_skills(
         }
         return Ok(());
     }
-    copy_batch(selected, &destination)
+    let items = selected
+        .iter()
+        .map(|(name, source)| InstallItem {
+            source: source.clone(),
+            destination: destination.join(name),
+        })
+        .collect::<Vec<_>>();
+    install_batch(&items, &destination, false)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn import_skills(
     store: &ProfileStore,
     profile: &str,
     source: &Path,
     selected_names: &[String],
+    create: bool,
     replace: bool,
     dry_run: bool,
 ) -> Result<()> {
     validate_component(profile, "profile")?;
     let source = absolute_path(source)?;
-    let sources = collect_import_sources(&source, selected_names)?;
+    let sources = collect_sources(&source, selected_names, store.root())?;
+    let profile_exists = store.profile_exists(profile)?;
+    if !profile_exists && !create {
+        bail!("profile does not exist: {profile}; rerun with --create to create it");
+    }
+    let profile_enabled = if profile_exists {
+        store.profile_enabled(profile)?
+    } else {
+        true
+    };
+    store.validate_enabled_additions(profile, profile_enabled, sources.entries.keys())?;
     let destination = store.root().join(profile);
-    preflight_import_destination(sources.keys(), &destination, replace)?;
+
+    if profile_exists {
+        preflight_import(sources.entries.keys(), &destination, replace)?;
+    }
     if dry_run {
-        for (name, source) in &sources {
-            let destination = destination.join(name);
+        if !profile_exists {
+            println!("create-profile\ttrue\t{}", destination.display());
+        }
+        for (name, source) in &sources.entries {
+            let target = destination.join(name);
             println!(
                 "{}\t{}\t{}",
-                if entry_exists(&destination)? {
-                    "replace"
-                } else {
-                    "copy"
-                },
+                if target.exists() { "replace" } else { "copy" },
                 source.display(),
-                destination.display()
+                target.display()
             );
         }
         return Ok(());
     }
-    if replace {
-        replace_batch(&sources, &destination)
-    } else {
-        copy_batch(&sources, &destination)
+
+    fs::create_dir_all(store.root())
+        .with_context(|| format!("failed to create {}", store.root().display()))?;
+    if !profile_exists {
+        return create_profile_with_sources(&sources.entries, &destination);
     }
+    let items = sources
+        .entries
+        .iter()
+        .map(|(name, source)| InstallItem {
+            source: source.clone(),
+            destination: destination.join(name),
+        })
+        .collect::<Vec<_>>();
+    install_batch(&items, &destination, replace)
 }
 
-fn collect_import_sources(
+pub fn update_skills(
+    store: &ProfileStore,
     source: &Path,
     selected_names: &[String],
-) -> Result<BTreeMap<String, PathBuf>> {
+    profile: Option<&str>,
+    all: bool,
+    dry_run: bool,
+) -> Result<()> {
+    if let Some(profile) = profile
+        && !store.profile_exists(profile)?
+    {
+        bail!("profile does not exist: {profile}");
+    }
+    let source = absolute_path(source)?;
+    let sources = collect_sources(&source, selected_names, store.root())?;
+    let mut inventory = BTreeMap::<String, Vec<(String, PathBuf)>>::new();
+    for owner in store.list_profiles()? {
+        for (name, path) in store.skills(&owner)? {
+            inventory
+                .entry(name)
+                .or_default()
+                .push((owner.clone(), path));
+        }
+    }
+
+    let mut items = Vec::new();
+    let mut skipped = Vec::new();
+    for (name, source) in &sources.entries {
+        let matches = inventory
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter(|(owner, _)| profile.is_none_or(|selected| owner == selected))
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            skipped.push(source.clone());
+            continue;
+        }
+        if matches.len() > 1 && !all {
+            let owners = matches
+                .iter()
+                .map(|(owner, _)| owner.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "update skill {name} exists in multiple profiles ({owners}); use --profile or --all"
+            );
+        }
+        for (_, destination) in matches {
+            if normalize_path(source) == normalize_path(destination) {
+                skipped.push(source.clone());
+                continue;
+            }
+            items.push(InstallItem {
+                source: source.clone(),
+                destination: destination.clone(),
+            });
+        }
+    }
+
+    if dry_run {
+        for item in &items {
+            println!(
+                "update\t{}\t{}",
+                item.source.display(),
+                item.destination.display()
+            );
+        }
+        for path in skipped {
+            println!("skip\t{}", path.display());
+        }
+        return Ok(());
+    }
+    install_batch(&items, store.root(), true)
+}
+
+struct CollectedSources {
+    entries: BTreeMap<String, PathBuf>,
+}
+
+fn collect_sources(
+    source: &Path,
+    selected_names: &[String],
+    profiles_root: &Path,
+) -> Result<CollectedSources> {
     let metadata = fs::symlink_metadata(source)
-        .with_context(|| format!("import source does not exist: {}", source.display()))?;
+        .with_context(|| format!("source does not exist: {}", source.display()))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        bail!("import source is not a directory: {}", source.display());
+        bail!("source is not a directory: {}", source.display());
     }
     let mut available = BTreeMap::new();
+    let mut managed_links = BTreeMap::new();
     for entry in sorted_entries(source)? {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') {
@@ -81,32 +195,187 @@ fn collect_import_sources(
         }
         validate_component(&name, "skill")?;
         let metadata = fs::symlink_metadata(entry.path())?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        if metadata.file_type().is_symlink() {
+            let target = resolved_link_target(&entry.path())?;
+            if is_managed_skill_target(&target, profiles_root) {
+                managed_links.insert(name, entry.path());
+                continue;
+            }
             bail!(
-                "import entry is not a directory: {}",
+                "source entry is an unmanaged symlink: {}",
+                entry.path().display()
+            );
+        }
+        if !metadata.is_dir() {
+            bail!(
+                "source entry is not a directory: {}",
                 entry.path().display()
             );
         }
         available.insert(name, entry.path());
     }
     if selected_names.is_empty() {
-        return Ok(available);
+        return Ok(CollectedSources { entries: available });
     }
     let mut selected = BTreeMap::new();
     for name in selected_names {
         validate_component(name, "skill")?;
-        let path = available
-            .get(name)
-            .with_context(|| format!("import skill does not exist: {name}"))?;
-        selected.insert(name.clone(), path.clone());
+        if let Some(path) = available.get(name) {
+            selected.insert(name.clone(), path.clone());
+            continue;
+        }
+        if managed_links.contains_key(name) {
+            continue;
+        }
+        bail!("source skill does not exist: {name}");
     }
-    Ok(selected)
+    Ok(CollectedSources { entries: selected })
 }
 
-fn preflight_destination<'a>(
-    names: impl Iterator<Item = &'a String>,
+fn create_profile_with_sources(
+    sources: &BTreeMap<String, PathBuf>,
     destination: &Path,
 ) -> Result<()> {
+    let root = destination
+        .parent()
+        .context("profile destination has no parent")?;
+    let staging = root.join(format!(".sm-profile-{}.{}", std::process::id(), nonce()));
+    if staging.exists() || destination.exists() {
+        bail!(
+            "profile transaction destination already exists: {}",
+            destination.display()
+        );
+    }
+    fs::create_dir(&staging)?;
+    let result = (|| -> Result<()> {
+        fs::write(staging.join(TAG_FILE), "true\n")?;
+        for (name, source) in sources {
+            copy_tree(source, &staging.join(name))?;
+        }
+        fs::rename(&staging, destination)?;
+        Ok(())
+    })();
+    if staging.exists() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result.with_context(|| format!("failed to create profile {}", destination.display()))
+}
+
+#[derive(Clone)]
+struct InstallItem {
+    source: PathBuf,
+    destination: PathBuf,
+}
+
+fn install_batch(items: &[InstallItem], transaction_root: &Path, replace: bool) -> Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    fs::create_dir_all(transaction_root)
+        .with_context(|| format!("failed to create {}", transaction_root.display()))?;
+    let transaction = format!("{}.{}", std::process::id(), nonce());
+    let staging = transaction_root.join(format!(".sm-install-{transaction}"));
+    let backup = transaction_root.join(format!(".sm-install-backup-{transaction}"));
+    if staging.exists() || backup.exists() {
+        bail!(
+            "install transaction path already exists in {}",
+            transaction_root.display()
+        );
+    }
+
+    for item in items {
+        match fs::symlink_metadata(&item.destination) {
+            Ok(metadata) => {
+                if !replace {
+                    bail!("destination already exists: {}", item.destination.display());
+                }
+                if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                    bail!(
+                        "replace destination is not a directory: {}",
+                        item.destination.display()
+                    );
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    fs::create_dir(&staging)?;
+    let staged = (|| -> Result<()> {
+        for (index, item) in items.iter().enumerate() {
+            copy_tree(&item.source, &staging.join(format!("{index:08}")))?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = staged {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+
+    fs::create_dir(&backup)?;
+    let mut installed = Vec::new();
+    let mut backed_up = Vec::new();
+    let committed = (|| -> Result<()> {
+        for (index, item) in items.iter().enumerate() {
+            if item.destination.exists() {
+                fs::rename(&item.destination, backup.join(format!("{index:08}")))?;
+                backed_up.push(index);
+            }
+            fs::rename(staging.join(format!("{index:08}")), &item.destination)?;
+            installed.push(index);
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = committed {
+        let rollback = rollback_install(items, &backup, &installed, &backed_up);
+        let _ = fs::remove_dir_all(&staging);
+        if let Err(rollback_error) = rollback {
+            return Err(error.context(format!(
+                "install rollback failed: {rollback_error:#}; backup remains at {}",
+                backup.display()
+            )));
+        }
+        let _ = fs::remove_dir_all(&backup);
+        return Err(error);
+    }
+
+    fs::remove_dir_all(&staging)?;
+    fs::remove_dir_all(&backup)
+        .with_context(|| format!("failed to remove install backup {}", backup.display()))
+}
+
+fn rollback_install(
+    items: &[InstallItem],
+    backup: &Path,
+    installed: &[usize],
+    backed_up: &[usize],
+) -> Result<()> {
+    let mut failures = Vec::new();
+    for index in installed.iter().rev() {
+        let path = &items[*index].destination;
+        if let Err(error) = fs::remove_dir_all(path) {
+            failures.push(format!("failed to remove {}: {error}", path.display()));
+        }
+    }
+    for index in backed_up.iter().rev() {
+        let destination = &items[*index].destination;
+        if let Err(error) = fs::rename(backup.join(format!("{index:08}")), destination) {
+            failures.push(format!(
+                "failed to restore {}: {error}",
+                destination.display()
+            ));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!("{}", failures.join("; "))
+    }
+}
+
+fn preflight_export<'a>(names: impl Iterator<Item = &'a String>, destination: &Path) -> Result<()> {
     if let Ok(metadata) = fs::symlink_metadata(destination)
         && (!metadata.is_dir() || metadata.file_type().is_symlink())
     {
@@ -124,169 +393,26 @@ fn preflight_destination<'a>(
     Ok(())
 }
 
-fn preflight_import_destination<'a>(
+fn preflight_import<'a>(
     names: impl Iterator<Item = &'a String>,
     destination: &Path,
     replace: bool,
 ) -> Result<()> {
-    if let Ok(metadata) = fs::symlink_metadata(destination)
-        && (!metadata.is_dir() || metadata.file_type().is_symlink())
-    {
-        bail!(
-            "copy destination is not a directory: {}",
-            destination.display()
-        );
-    }
     for name in names {
         let path = destination.join(name);
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("failed to inspect import destination {}", path.display())
-                });
-            }
+            Err(error) => return Err(error.into()),
         };
         if !replace {
-            bail!("copy destination already exists: {}", path.display());
+            bail!("destination already exists: {}", path.display());
         }
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             bail!("replace destination is not a directory: {}", path.display());
         }
     }
     Ok(())
-}
-
-fn entry_exists(path: &Path) -> Result<bool> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error).with_context(|| format!("failed to inspect {}", path.display())),
-    }
-}
-
-fn replace_batch(sources: &BTreeMap<String, PathBuf>, destination: &Path) -> Result<()> {
-    fs::create_dir_all(destination)
-        .with_context(|| format!("failed to create {}", destination.display()))?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let transaction = format!("{}.{}", std::process::id(), nonce);
-    let staging = destination.join(format!(".sm-import-{transaction}"));
-    let backup = destination.join(format!(".sm-import-backup-{transaction}"));
-    if entry_exists(&staging)? || entry_exists(&backup)? {
-        bail!(
-            "import transaction path already exists in {}",
-            destination.display()
-        );
-    }
-
-    fs::create_dir(&staging)?;
-    let staged = (|| -> Result<()> {
-        for (name, source) in sources {
-            copy_tree(source, &staging.join(name))?;
-        }
-        Ok(())
-    })();
-    if let Err(error) = staged {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(error);
-    }
-
-    fs::create_dir(&backup)?;
-    let mut installed = Vec::new();
-    let mut backed_up = Vec::new();
-    let committed = (|| -> Result<()> {
-        for name in sources.keys() {
-            let final_path = destination.join(name);
-            if entry_exists(&final_path)? {
-                fs::rename(&final_path, backup.join(name))
-                    .with_context(|| format!("failed to back up imported skill {name}"))?;
-                backed_up.push(name.clone());
-            }
-            fs::rename(staging.join(name), &final_path)
-                .with_context(|| format!("failed to install imported skill {name}"))?;
-            installed.push(name.clone());
-        }
-        Ok(())
-    })();
-
-    if let Err(error) = committed {
-        let rollback = rollback_import(destination, &backup, &installed, &backed_up);
-        let _ = fs::remove_dir_all(&staging);
-        if let Err(rollback_error) = rollback {
-            return Err(error.context(format!(
-                "import rollback failed: {rollback_error:#}; backup remains at {}",
-                backup.display()
-            )));
-        }
-        let _ = fs::remove_dir(&backup);
-        return Err(error);
-    }
-
-    fs::remove_dir(&staging)?;
-    fs::remove_dir_all(&backup)
-        .with_context(|| format!("failed to remove import backup {}", backup.display()))
-}
-
-fn rollback_import(
-    destination: &Path,
-    backup: &Path,
-    installed: &[String],
-    backed_up: &[String],
-) -> Result<()> {
-    let mut failures = Vec::new();
-    for name in installed.iter().rev() {
-        let path = destination.join(name);
-        if let Err(error) = fs::remove_dir_all(&path) {
-            failures.push(format!("failed to remove {}: {error}", path.display()));
-        }
-    }
-    for name in backed_up.iter().rev() {
-        let source = backup.join(name);
-        let destination = destination.join(name);
-        if let Err(error) = fs::rename(&source, &destination) {
-            failures.push(format!(
-                "failed to restore {}: {error}",
-                destination.display()
-            ));
-        }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        bail!("{}", failures.join("; "))
-    }
-}
-
-fn copy_batch(sources: &BTreeMap<String, PathBuf>, destination: &Path) -> Result<()> {
-    fs::create_dir_all(destination)
-        .with_context(|| format!("failed to create {}", destination.display()))?;
-    let staging = destination.join(format!(".sm-copy-{}", std::process::id()));
-    if staging.exists() {
-        bail!(
-            "copy staging directory already exists: {}",
-            staging.display()
-        );
-    }
-    fs::create_dir(&staging)?;
-    let result = (|| -> Result<()> {
-        for (name, source) in sources {
-            copy_tree(source, &staging.join(name))?;
-        }
-        for name in sources.keys() {
-            fs::rename(staging.join(name), destination.join(name))
-                .with_context(|| format!("failed to install copied skill {name}"))?;
-        }
-        fs::remove_dir(&staging)?;
-        Ok(())
-    })();
-    if staging.exists() {
-        let _ = fs::remove_dir_all(&staging);
-    }
-    result
 }
 
 fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
@@ -316,4 +442,11 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
         return Ok(());
     }
     bail!("unsupported file type in skill: {}", source.display())
+}
+
+fn nonce() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
 }
