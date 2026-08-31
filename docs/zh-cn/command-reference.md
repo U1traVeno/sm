@@ -99,7 +99,7 @@ sm import \
   [--create] [--replace] [--dry-run]
 ```
 
-把来源目录复制到一个 profile。默认来源为 `.skills`。Import 可以增加 skill 并显式新建 profile，但保留全部来源目录。sm 受管来源链接会跳过，其他软链接会被拒绝。
+把来源目录复制到一个 profile。默认来源为 `.skills`。Import 可以增加 skill 并显式新建 profile，但保留全部来源目录。普通非目录条目会忽略，sm 受管来源链接会跳过，其他软链接会被拒绝。
 
 ## `sm update`
 
@@ -111,7 +111,7 @@ sm update \
   [--dry-run]
 ```
 
-只替换 inventory 中已有的同名 skills。未知来源名称会跳过，永远不会 import。同名 inventory 冲突必须指定一个 profile 或全部 owners。来源目录保留。
+只替换 inventory 中已有的同名 skills。未知来源目录和普通非目录条目会跳过，永远不会 import。同名 inventory 冲突必须指定一个 profile 或全部 owners。来源目录保留。
 
 ## `sm export`
 

@@ -26,6 +26,7 @@ sm import --profile project-tools --from .skills --create
 - import 可以增加 skills，但不删除来源目录；
 - 已存在目标需要显式 `--replace`；
 - replace 只影响本次选中名称；
+- 来源中的普通文件和其他非目录条目会忽略；
 - 来源中的 sm 受管链接会跳过；
 - 其他来源软链接会被拒绝；
 - 完整批次先 staging，再执行替换；

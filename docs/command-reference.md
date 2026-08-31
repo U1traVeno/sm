@@ -106,7 +106,7 @@ sm import \
   [--create] [--replace] [--dry-run]
 ```
 
-Copy source directories into one profile. The default source is `.skills`. Import may add skills and explicitly create a profile, but leaves all source directories in place. Managed source links are skipped; other source symlinks are rejected.
+Copy source directories into one profile. The default source is `.skills`. Import may add skills and explicitly create a profile, but leaves all source directories in place. Ordinary non-directory entries are ignored, managed source links are skipped, and other source symlinks are rejected.
 
 ## `sm update`
 
@@ -118,7 +118,7 @@ sm update \
   [--dry-run]
 ```
 
-Replace only existing same-named inventory skills. Unknown source names are skipped and never imported. Duplicate inventory names require one profile or all existing owners. Source directories remain in place.
+Replace only existing same-named inventory skills. Unknown source directories and ordinary non-directory entries are skipped and never imported. Duplicate inventory names require one profile or all existing owners. Source directories remain in place.
 
 ## `sm export`
 

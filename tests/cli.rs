@@ -376,6 +376,23 @@ fn update_replaces_only_existing_skills_and_requires_duplicate_disambiguation() 
 }
 
 #[test]
+fn update_ignores_non_directory_entries_in_the_source_root() {
+    let fixture = Fixture::new();
+    fixture.add_skill("derivon", "derivon-cli", "old\n");
+    let source = fixture.project.join("source");
+    fs::create_dir_all(source.join("derivon-cli")).unwrap();
+    fs::write(source.join("derivon-cli/origin"), "new\n").unwrap();
+    fs::write(source.join("CONTEXT.md"), "context\n").unwrap();
+    fs::write(source.join("package.json"), "{}\n").unwrap();
+
+    fixture.run(&["update", "--from", "source"]);
+    assert_eq!(
+        fs::read_to_string(fixture.sm_home.join("profiles/derivon/derivon-cli/origin")).unwrap(),
+        "new\n"
+    );
+}
+
+#[test]
 fn adopt_preserves_config_and_is_idempotent() {
     let fixture = Fixture::new();
     let config = fixture.config_home.join("sm/config.toml");

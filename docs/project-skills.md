@@ -26,6 +26,7 @@ Rules:
 - import may add skills but never deletes source directories;
 - existing destination names fail unless `--replace` is explicit;
 - replacement affects selected names only;
+- ordinary files and other non-directory source entries are ignored;
 - sm-managed links in the source are skipped;
 - other source symlinks are rejected;
 - the complete batch is staged before replacement;

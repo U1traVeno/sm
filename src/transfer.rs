@@ -193,9 +193,9 @@ fn collect_sources(
         if name.starts_with('.') {
             continue;
         }
-        validate_component(&name, "skill")?;
         let metadata = fs::symlink_metadata(entry.path())?;
         if metadata.file_type().is_symlink() {
+            validate_component(&name, "skill")?;
             let target = resolved_link_target(&entry.path())?;
             if is_managed_skill_target(&target, profiles_root) {
                 managed_links.insert(name, entry.path());
@@ -207,11 +207,9 @@ fn collect_sources(
             );
         }
         if !metadata.is_dir() {
-            bail!(
-                "source entry is not a directory: {}",
-                entry.path().display()
-            );
+            continue;
         }
+        validate_component(&name, "skill")?;
         available.insert(name, entry.path());
     }
     if selected_names.is_empty() {
