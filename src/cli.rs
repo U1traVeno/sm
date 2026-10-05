@@ -91,7 +91,7 @@ pub enum Command {
 
     /// Reconcile configured targets with globally enabled profiles.
     #[command(
-        long_about = "Reconcile configured targets with globally enabled profiles.\n\nBy default every persistent target is preflighted before any is changed. Real directories block reconciliation unless --force removes them. Ordinary files, hidden entries, and unrelated symlinks are preserved unless they block a desired skill name.",
+        long_about = "Reconcile configured targets with globally enabled profiles.\n\nBy default every persistent target is preflighted before any is changed. Skill copies (real directories containing SKILL.md) block reconciliation unless --force removes them. Other real directories belong to other owners and are always preserved. Ordinary files, hidden entries, and unrelated symlinks are preserved unless they block a desired skill name.",
         after_long_help = "Examples:\n  sm apply\n  sm apply --force\n  sm apply --target agents --dry-run"
     )]
     Apply {

@@ -72,7 +72,7 @@ sm apply --target agents
 sm apply --force
 ```
 
-A real directory in a target blocks normal apply. `--force` removes non-hidden real directories before creating the desired links, which is useful after an external installer writes directly into a target.
+A skill copy (a real directory containing `SKILL.md`) in a target blocks normal apply. `--force` removes non-hidden skill copies before creating the desired links, which is useful after an external installer writes directly into a target. Real directories without `SKILL.md`, such as an agent's own `synced/` cache, belong to another owner and are always preserved.
 
 Register another projection directory without hand-editing TOML:
 

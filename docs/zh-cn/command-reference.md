@@ -75,7 +75,7 @@ sm apply [-t TARGET] [-f|--force] [--dry-run]
 
 将全局启用 skills 投影到全部或一个 target。修改前会 preflight 所有选中 targets。
 
-无 force 时，任意非隐藏真实目录都会阻止整个操作。使用 force 时，这些目录会删除。受管链接按需修复或删除。普通文件、隐藏条目和无关外部链接会保留，除非占用 desired 名称。
+无 force 时，任意非隐藏 skill 副本（含 `SKILL.md` 的真实目录）都会阻止整个操作。使用 force 时，这些目录会删除。不含 `SKILL.md` 的真实目录属于其他程序，始终保留。受管链接按需修复或删除。普通文件、隐藏条目和无关外部链接会保留，除非占用 desired 名称。
 
 ## `sm shell`
 

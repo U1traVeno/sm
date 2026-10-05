@@ -82,7 +82,7 @@ sm apply [-t TARGET] [-f|--force] [--dry-run]
 
 Project globally enabled skills to all persistent targets, or one selected target. All selected targets are preflighted before mutation.
 
-Without force, any non-hidden real directory blocks the entire operation. With force, those directories are removed. Managed links are repaired or removed as needed. Files, hidden entries, and unrelated external symlinks are preserved unless they block a desired name.
+Without force, any non-hidden skill copy (a real directory containing `SKILL.md`) blocks the entire operation. With force, those directories are removed. Real directories without `SKILL.md` belong to another owner and are always preserved. Managed links are repaired or removed as needed. Files, hidden entries, and unrelated external symlinks are preserved unless they block a desired name.
 
 ## `sm shell`
 

@@ -63,7 +63,9 @@ pub fn plan_links(
     let mut removed_directories = BTreeSet::new();
     for (name, path) in &existing {
         let metadata = fs::symlink_metadata(path)?;
-        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        // Only a skill copy (an installer's output) blocks or is removed; a real
+        // directory without SKILL.md belongs to another owner and is preserved.
+        if metadata.is_dir() && !metadata.file_type().is_symlink() && is_skill_copy(path) {
             if !force {
                 bail!(
                     "real directory blocks target reconciliation: {}; rerun with --force to remove it",
@@ -229,6 +231,10 @@ pub fn is_managed_skill_target(target: &Path, profiles_root: &Path) -> bool {
         && components
             .iter()
             .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+fn is_skill_copy(directory: &Path) -> bool {
+    fs::symlink_metadata(directory.join("SKILL.md")).is_ok()
 }
 
 fn atomic_link(source: &Path, destination: &Path) -> Result<()> {

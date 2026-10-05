@@ -75,8 +75,8 @@ Generation ID 代表所选 skill 路径、shell adapters、wrapper 可执行路�
   web-search  -> ~/.sm/profiles/research/web-search
 ```
 
-所有 targets 得到同一个全局启用集合。普通 apply 管理指向 `$SM_HOME/profiles` 的链接，并拒绝真实目录。Force apply 删除全部非隐藏真实目录，再安装 desired links；普通文件、隐藏条目和无关外部链接不受管理。
+所有 targets 得到同一个全局启用集合。普通 apply 管理指向 `$SM_HOME/profiles` 的链接，并拒绝 skill 副本（含 `SKILL.md` 的真实目录）。Force apply 删除全部非隐藏 skill 副本，再安装 desired links；普通文件、隐藏条目、无关外部链接和不含 `SKILL.md` 的真实目录不受管理。
 
 ## 项目与 Installer 副本
 
-Import、update 和 export 操作普通副本目录。Import 与 update 保留来源；如果来源本身就是 configured target，后续 force apply 可以删除其中真实目录。
+Import、update 和 export 操作普通副本目录。Import 与 update 保留来源；如果来源本身就是 configured target，后续 force apply 可以删除其中的 skill 副本。

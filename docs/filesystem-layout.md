@@ -75,8 +75,8 @@ Configured target directories exist outside sm state:
   web-search  -> ~/.sm/profiles/research/web-search
 ```
 
-Every target receives the same globally active set. Normal apply manages links under `$SM_HOME/profiles` and rejects real directories. Force apply removes all non-hidden real directories, then installs desired links. Ordinary files, hidden entries, and unrelated external links remain unmanaged.
+Every target receives the same globally active set. Normal apply manages links under `$SM_HOME/profiles` and rejects skill copies (real directories containing `SKILL.md`). Force apply removes all non-hidden skill copies, then installs desired links. Ordinary files, hidden entries, unrelated external links, and real directories without `SKILL.md` remain unmanaged.
 
 ## Project and Installer Copies
 
-Import, update, and export operate on ordinary copied directories. Import and update leave their sources in place; force apply may later remove real directories when the source is itself a configured target.
+Import, update, and export operate on ordinary copied directories. Import and update leave their sources in place; force apply may later remove skill copies when the source is itself a configured target.

@@ -67,7 +67,7 @@ sm apply --force --dry-run
 sm apply --force
 ```
 
-Force 会删除选中 targets 内全部非隐藏真实目录。普通文件、隐藏条目和无关外部软链接会保留。
+Force 会删除选中 targets 内全部非隐藏 skill 副本（含 `SKILL.md` 的真实目录）。普通文件、隐藏条目、无关外部软链接和不含 `SKILL.md` 的真实目录会保留。
 
 ## 5. 启用与停用
 

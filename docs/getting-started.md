@@ -67,7 +67,7 @@ Then reconcile:
 sm apply --force
 ```
 
-Force removes all non-hidden real directories from selected targets. Ordinary files, hidden entries, and unrelated external symlinks are preserved.
+Force removes all non-hidden skill copies (real directories containing `SKILL.md`) from selected targets. Ordinary files, hidden entries, unrelated external symlinks, and real directories without `SKILL.md` are preserved.
 
 ## 5. Enable and Disable
 

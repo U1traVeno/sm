@@ -63,11 +63,11 @@ Normal apply:
 
 - repairs missing or stale sm-managed links;
 - removes obsolete sm-managed links;
-- preserves hidden entries, regular files, external symlinks, and real directories;
-- fails if any non-hidden real directory is present;
+- preserves hidden entries, regular files, external symlinks, and real directories without `SKILL.md`;
+- fails if any non-hidden skill copy (a real directory containing `SKILL.md`) is present;
 - fails if a preserved entry blocks a desired skill name.
 
-`sm apply --force` removes every non-hidden real directory in selected targets before linking. It still preserves ordinary files, hidden entries, and unrelated external symlinks.
+`sm apply --force` removes every non-hidden skill copy in selected targets before linking. It still preserves ordinary files, hidden entries, unrelated external symlinks, and real directories without `SKILL.md`, which belong to another owner.
 
 ## Shell Adapters
 

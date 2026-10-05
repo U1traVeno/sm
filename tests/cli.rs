@@ -192,8 +192,10 @@ fn apply_force_removes_real_directories_and_preserves_other_unmanaged_entries() 
     let fixture = Fixture::new();
     let managed = fixture.add_skill("common", "managed", "canonical\n");
     fixture.write_config(None);
-    fs::create_dir_all(fixture.target.join("managed")).unwrap();
-    fs::create_dir_all(fixture.target.join("unwanted")).unwrap();
+    for copy in ["managed", "unwanted"] {
+        fs::create_dir_all(fixture.target.join(copy)).unwrap();
+        fs::write(fixture.target.join(copy).join("SKILL.md"), "copy\n").unwrap();
+    }
     fs::create_dir_all(fixture.target.join(".hidden")).unwrap();
     fs::write(fixture.target.join("notes.txt"), "keep\n").unwrap();
     let external = fixture.project.join("external");
@@ -218,6 +220,45 @@ fn apply_force_removes_real_directories_and_preserves_other_unmanaged_entries() 
         "keep\n"
     );
     assert!(fixture.target.join("custom-link").is_symlink());
+}
+
+#[test]
+fn apply_preserves_real_directories_without_skill_md_even_with_force() {
+    let fixture = Fixture::new();
+    let managed = fixture.add_skill("common", "managed", "canonical\n");
+    fixture.write_config(None);
+    let foreign = fixture.target.join("synced");
+    fs::create_dir_all(foreign.join("bucket/pdf")).unwrap();
+    fs::write(foreign.join("bucket/pdf/SKILL.md"), "nested\n").unwrap();
+
+    fixture.run(&["apply"]);
+    assert_eq!(
+        fs::read_link(fixture.target.join("managed")).unwrap(),
+        managed.canonicalize().unwrap()
+    );
+    assert!(foreign.join("bucket/pdf/SKILL.md").is_file());
+
+    fixture.run(&["apply", "--force"]);
+    assert!(foreign.join("bucket/pdf/SKILL.md").is_file());
+}
+
+#[test]
+fn apply_reports_a_directory_without_skill_md_that_blocks_a_desired_skill() {
+    let fixture = Fixture::new();
+    fixture.add_skill("common", "managed", "canonical\n");
+    fixture.write_config(None);
+    fs::create_dir_all(fixture.target.join("managed/data")).unwrap();
+
+    let output = fixture
+        .command()
+        .args(["apply", "--force"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unmanaged target entry blocks skill")
+    );
+    assert!(fixture.target.join("managed/data").is_dir());
 }
 
 #[test]
@@ -251,6 +292,7 @@ fn apply_preflights_every_target_before_mutation_and_status_lists_all() {
     fixture.add_skill("common", "shared", "common\n");
     let second = fixture._root.path().join("second-target");
     fs::create_dir_all(second.join("blocked")).unwrap();
+    fs::write(second.join("blocked/SKILL.md"), "copy\n").unwrap();
     let config_dir = fixture.config_home.join("sm");
     fs::create_dir_all(&config_dir).unwrap();
     fs::write(
